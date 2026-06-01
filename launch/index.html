@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.4</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.1.0</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -97,6 +97,11 @@
         <div class="row"><span class="lbl">マーカーサイズ (px)</span><span class="val" id="s-size">-</span></div>
         <div class="row"><span class="lbl">FPS</span><span class="val" id="s-fps">-</span></div>
         <div class="row"><span class="lbl">検出率</span><span class="val" id="s-rate">-</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl">キャンバー角</span><span class="val" id="s-camber" style="font-size:18px;">-</span>
+        </div>
+        <div class="row"><span class="lbl" style="font-size:11px;">重力 g (cam)</span><span class="val" id="s-grav" style="font-size:11px;font-family:monospace;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">法線 n (cam)</span><span class="val" id="s-norm" style="font-size:11px;font-family:monospace;">-</span></div>
     </div>
 
     <div id="controls">
@@ -123,6 +128,46 @@ let detecting = false;
 let frameCount = 0, detectCount = 0, trialCount = 0;
 let fps = 0, lastFpsTime = performance.now();
 
+// ---- 重力ベクトル（DeviceMotion）----
+// device frame の加速度を低域通過させて重力方向を抽出
+let gravDev = { x: 0, y: 0, z: 0 };  // device frame
+let gravOK = false;
+const GRAV_ALPHA = 0.85;  // ローパス係数（大きいほど滑らか）
+
+function onDeviceMotion(e) {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    gravDev.x = GRAV_ALPHA * gravDev.x + (1 - GRAV_ALPHA) * a.x;
+    gravDev.y = GRAV_ALPHA * gravDev.y + (1 - GRAV_ALPHA) * a.y;
+    gravDev.z = GRAV_ALPHA * gravDev.z + (1 - GRAV_ALPHA) * a.z;
+    gravOK = true;
+}
+
+async function enableMotion() {
+    try {
+        // iOS 13+ は明示的な許可が必要（ユーザー操作内で呼ぶ）
+        if (typeof DeviceMotionEvent !== 'undefined' &&
+            typeof DeviceMotionEvent.requestPermission === 'function') {
+            const res = await DeviceMotionEvent.requestPermission();
+            if (res !== 'granted') return false;
+        }
+        window.addEventListener('devicemotion', onDeviceMotion);
+        return true;
+    } catch(e) {
+        console.warn('motion permission error', e);
+        return false;
+    }
+}
+
+// device frame の重力 → camera frame へ変換
+// iPhone portrait・背面カメラ:
+//   camera: x=右, y=下, z=前方(シーン方向)  [OpenCV/AprilTag規約]
+//   device: x=右, y=上, z=画面手前         [W3C規約]
+//   → x_cam = x_dev, y_cam = -y_dev, z_cam = -z_dev
+function gravityInCamera() {
+    return { x: gravDev.x, y: -gravDev.y, z: -gravDev.z };
+}
+
 // オフスクリーンキャンバス（フレーム取得用）
 const offscreen = document.createElement('canvas');
 const offCtx    = offscreen.getContext('2d', { willReadFrequently: true });
@@ -130,6 +175,9 @@ const offCtx    = offscreen.getContext('2d', { willReadFrequently: true });
 // ---- 初期化 ----
 
 async function init() {
+    // 重力センサー許可（startBtnタップのユーザー操作内で呼ぶ必要あり）
+    await enableMotion();
+
     $('start-screen').style.display = 'none';
     $('loading').style.display = 'flex';
 
@@ -325,6 +373,47 @@ function updateStats(d) {
         const dx = c[1].x - c[0].x, dy = c[1].y - c[0].y;
         $('s-size').textContent = Math.round(Math.sqrt(dx*dx + dy*dy)) + ' px';
     }
+
+    updateCamber(d);
+}
+
+// ---- キャンバー角の計算 ----
+// 原理: タグ法線（pose.Rの第3列＝タグのz軸をカメラ座標で表したもの）と
+//       重力ベクトル（カメラ座標）のなす角からホイールの傾きを求める。
+//   ホイール垂直 → 法線は水平 → 法線·重力 = 0 → キャンバー 0°
+//   ホイール傾斜θ → 法線が水平からθ傾く → キャンバー θ°
+function updateCamber(d) {
+    const camberEl = $('s-camber');
+    const gravEl   = $('s-grav');
+    const normEl   = $('s-norm');
+
+    if (!d.pose || !d.pose.R) { camberEl.textContent = '-'; return; }
+    if (!gravOK) { camberEl.textContent = 'センサー待ち'; camberEl.className = 'val mid'; return; }
+
+    const R = d.pose.R;
+    // タグz軸（法線）= Rの第3列
+    let n = { x: R[0][2], y: R[1][2], z: R[2][2] };
+    const nLen = Math.hypot(n.x, n.y, n.z) || 1;
+    n.x /= nLen; n.y /= nLen; n.z /= nLen;
+
+    // 重力（カメラ座標、下向き）を正規化
+    const g = gravityInCamera();
+    const gLen = Math.hypot(g.x, g.y, g.z) || 1;
+    const gh = { x: g.x / gLen, y: g.y / gLen, z: g.z / gLen };
+
+    // 法線の鉛直成分 = sin(キャンバー)
+    let dot = n.x * gh.x + n.y * gh.y + n.z * gh.z;
+    dot = Math.max(-1, Math.min(1, dot));
+    const camber = Math.asin(dot) * 180 / Math.PI;
+
+    camberEl.textContent = camber.toFixed(2) + '°';
+    camberEl.className = 'val good';
+
+    // デバッグ表示
+    gravEl.textContent = `${gh.x.toFixed(2)},${gh.y.toFixed(2)},${gh.z.toFixed(2)}`;
+    normEl.textContent = `${n.x.toFixed(2)},${n.y.toFixed(2)},${n.z.toFixed(2)}`;
+
+    window._lastCamber = camber;
 }
 
 function updateStatsNone() {
@@ -340,9 +429,9 @@ $('startBtn').onclick = () => init();
 $('recordBtn').onclick = () => {
     const rate   = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
     const id     = $('s-id').textContent;
-    const margin = $('s-margin').textContent;
-    const size   = $('s-size').textContent;
-    addLog(`検出率:${rate}% | ${id} | 信頼度:${margin} | サイズ:${size} | FPS:${fps}`);
+    const dist   = $('s-margin').textContent;
+    const camber = $('s-camber').textContent;
+    addLog(`${id} | 距離:${dist} | キャンバー:${camber} | 検出率:${rate}% | FPS:${fps}`);
     detectCount = 0; trialCount = 0;
 };
 
