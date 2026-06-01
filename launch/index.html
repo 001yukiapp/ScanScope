@@ -6,7 +6,7 @@
     <title>ScanScope Phase0 - AprilTag検証</title>
     <script>
     // バージョンが変わるとURLが変わり、キャッシュが自動で無効化される
-    const _V = 'v0.2.4';
+    const _V = 'v0.2.5';
     if (!location.search.includes(_V)) {
         location.replace(location.pathname + '?v=' + _V);
     }
@@ -77,7 +77,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.4</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.5</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -532,7 +532,7 @@ function updateToeStats() {
 function updateToe(detections) {
     const toeEl   = $('s-toe');
     const pairEl  = $('s-toepair');
-    const pitchEl = $('s-toepitch');
+    const pitchEl = $('s-toepitch') || {};
 
     // pose.R を持つ検出だけ抽出、ID昇順で安定化
     const withPose = detections
