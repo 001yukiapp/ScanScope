@@ -1,1 +1,335 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ScanScope Phase0 - AprilTag検証</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #111; color: #fff;
+            font-family: -apple-system, sans-serif;
+            height: 100svh; overflow: hidden;
+        }
+        #start-screen {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 16px;
+        }
+        #start-screen h1 { font-size: 24px; }
+        #start-screen p  { color: #888; font-size: 14px; text-align: center; line-height: 1.6; padding: 0 32px; }
+        #main { position: absolute; inset: 0; display: none; }
+        video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+        canvas#overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+        #panel {
+            position: absolute; top: 12px; left: 12px; right: 12px;
+            background: rgba(0,0,0,0.75); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 14px 16px;
+        }
+        .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 14px; }
+        .lbl { color: #888; }
+        .val { font-weight: 600; }
+        .good { color: #34d058; }
+        .bad  { color: #ff6b6b; }
+        .mid  { color: #ffd700; }
+        #controls {
+            position: absolute; bottom: 178px; left: 50%;
+            transform: translateX(-50%);
+            display: flex; gap: 12px;
+        }
+        #log-panel {
+            position: absolute; bottom: 12px; left: 12px; right: 12px;
+            background: rgba(0,0,0,0.75); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 12px;
+            height: 154px; overflow-y: auto;
+            font-size: 11px; font-family: monospace; line-height: 1.5;
+        }
+        .entry { border-bottom: 1px solid #222; padding: 2px 0; }
+        button {
+            background: #007aff; color: #fff; border: none;
+            border-radius: 12px; padding: 12px 22px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+            white-space: nowrap;
+        }
+        button.sec { background: rgba(80,80,80,0.9); }
+        #loading {
+            position: absolute; inset: 0; background: #111;
+            display: none; flex-direction: column;
+            align-items: center; justify-content: center; gap: 12px;
+        }
+        #loading p { color: #888; font-size: 14px; text-align: center; padding: 0 24px; line-height: 1.6; }
+        .spinner {
+            width: 36px; height: 36px;
+            border: 3px solid #333; border-top-color: #007aff;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
 
+<div id="start-screen">
+    <h1>ScanScope Phase0</h1>
+    <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。<br>HTTPS環境が必要です。</p>
+    <button id="startBtn">カメラ起動</button>
+</div>
+
+<div id="loading">
+    <div class="spinner"></div>
+    <p id="loading-msg">WASM読み込み中...<br>初回は10〜20秒かかります</p>
+</div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row"><span class="lbl">検出状態</span><span class="val" id="s-status">初期化中</span></div>
+        <div class="row"><span class="lbl">タグID</span><span class="val" id="s-id">-</span></div>
+        <div class="row"><span class="lbl">信頼度</span><span class="val" id="s-margin">-</span></div>
+        <div class="row"><span class="lbl">マーカーサイズ (px)</span><span class="val" id="s-size">-</span></div>
+        <div class="row"><span class="lbl">FPS</span><span class="val" id="s-fps">-</span></div>
+        <div class="row"><span class="lbl">検出率</span><span class="val" id="s-rate">-</span></div>
+    </div>
+
+    <div id="controls">
+        <button id="recordBtn">記録</button>
+        <button class="sec" id="clearBtn">クリア</button>
+    </div>
+
+    <div id="log-panel"></div>
+</div>
+
+<!-- Comlink (Worker間通信ライブラリ) -->
+<script src="https://unpkg.com/comlink/dist/umd/comlink.js"></script>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const video   = $('video');
+const overlay = $('overlay');
+const ctx     = overlay.getContext('2d');
+const logEl   = $('log-panel');
+
+let detector = null;
+let detecting = false;
+let frameCount = 0, detectCount = 0, trialCount = 0;
+let fps = 0, lastFpsTime = performance.now();
+
+// オフスクリーンキャンバス（フレーム取得用）
+const offscreen = document.createElement('canvas');
+const offCtx    = offscreen.getContext('2d', { willReadFrequently: true });
+
+// ---- 初期化 ----
+
+async function init() {
+    $('start-screen').style.display = 'none';
+    $('loading').style.display = 'flex';
+
+    try {
+        // AprilTag Workerを起動してComlink経由で使う
+        detector = await new Promise((resolve, reject) => {
+            const ApriltagClass = Comlink.wrap(new Worker('./apriltag.js'));
+            const onReady = Comlink.proxy(async () => {
+                resolve(instance);
+            });
+            const instance = new ApriltagClass(onReady);
+            // タイムアウト
+            setTimeout(() => reject(new Error('WASM読み込みタイムアウト（30秒）')), 30000);
+        });
+
+        $('loading-msg').textContent = 'カメラ起動中...';
+        await startCamera();
+
+    } catch(e) {
+        $('loading').style.display = 'flex';
+        $('loading-msg').textContent = 'エラー: ' + e.message;
+        console.error(e);
+    }
+}
+
+async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+            facingMode: { ideal: 'environment' },
+            width:  { ideal: 1920 },
+            height: { ideal: 1080 }
+        },
+        audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+
+    overlay.width  = video.videoWidth;
+    overlay.height = video.videoHeight;
+
+    // iPhone 14 Pro 後カメラ（広角）の近似内部パラメータ
+    // 1920x1080 想定。fx≈fy≈1450, cx=960, cy=540
+    await detector.set_camera_info(1450, 1450, 960, 540);
+
+    $('loading').style.display = 'none';
+    $('main').style.display = 'block';
+
+    requestAnimationFrame(detectLoop);
+}
+
+// ---- 検出ループ ----
+
+async function detectLoop() {
+    // FPS計算
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+        fps = frameCount; frameCount = 0; lastFpsTime = now;
+        $('s-fps').textContent = fps;
+    }
+
+    if (!detecting && video.readyState >= 2) {
+        detecting = true;
+        await runDetect();
+        detecting = false;
+    }
+
+    requestAnimationFrame(detectLoop);
+}
+
+async function runDetect() {
+    // フレーム取得
+    const W = video.videoWidth, H = video.videoHeight;
+    offscreen.width = W; offscreen.height = H;
+    offCtx.drawImage(video, 0, 0);
+    const imageData = offCtx.getImageData(0, 0, W, H);
+
+    // RGBA → グレースケール変換
+    const gray = rgbaToGray(imageData);
+
+    // 検出
+    let detections = [];
+    try {
+        detections = await detector.detect(gray, W, H) || [];
+    } catch(e) {
+        console.warn('detect error:', e);
+    }
+
+    trialCount++;
+
+    // オーバーレイ描画
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    if (detections.length > 0) {
+        detectCount++;
+        detections.forEach(d => drawTag(d));
+        updateStats(detections[0]);
+    } else {
+        updateStatsNone();
+    }
+
+    const rate = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
+    $('s-rate').textContent = `${detectCount} / ${trialCount}  (${rate}%)`;
+}
+
+// RGBA → グレースケール（高速近似）
+function rgbaToGray(imageData) {
+    const { data, width, height } = imageData;
+    const gray = new Uint8Array(width * height);
+    for (let i = 0; i < gray.length; i++) {
+        // ITU-R BT.601
+        gray[i] = (data[i*4] * 77 + data[i*4+1] * 151 + data[i*4+2] * 28) >> 8;
+    }
+    return gray;
+}
+
+// ---- 描画 ----
+
+function drawTag(d) {
+    const c = d.corners;
+    if (!c || c.length < 4) return;
+
+    // 枠線
+    ctx.strokeStyle = '#34d058';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(c[0].x, c[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // 中心点
+    ctx.fillStyle = '#34d058';
+    ctx.beginPath();
+    ctx.arc(d.center.x, d.center.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // IDラベル
+    const labelX = c[0].x, labelY = c[0].y - 4;
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(labelX, labelY - 18, 56, 20);
+    ctx.fillStyle = '#34d058';
+    ctx.font = 'bold 13px -apple-system';
+    ctx.fillText(`ID:${d.id}`, labelX + 4, labelY - 2);
+
+    // 角番号（0=左上から時計回り）
+    ctx.fillStyle = '#ff0';
+    ctx.font = '11px monospace';
+    c.forEach((pt, i) => ctx.fillText(i, pt.x + 4, pt.y - 3));
+
+    // ポーズ情報があれば表示
+    if (d.pose && d.pose.t) {
+        const t = d.pose.t;
+        const dist = Math.sqrt(t[0]**2 + t[1]**2 + t[2]**2) * 100; // m→cm
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px -apple-system';
+        ctx.fillText(`${dist.toFixed(1)}cm`, d.center.x + 10, d.center.y);
+    }
+}
+
+function updateStats(d) {
+    const s = $('s-status');
+    s.textContent = '✓ 検出中'; s.className = 'val good';
+    $('s-id').textContent = `Tag #${d.id}`;
+
+    const m = $('s-margin');
+    const margin = d.decision_margin || 0;
+    m.textContent = margin.toFixed(1);
+    m.className = 'val ' + (margin > 100 ? 'good' : margin > 50 ? 'mid' : 'bad');
+
+    if (d.corners) {
+        const c = d.corners;
+        const dx = c[1].x - c[0].x, dy = c[1].y - c[0].y;
+        $('s-size').textContent = Math.round(Math.sqrt(dx*dx + dy*dy)) + ' px';
+    }
+}
+
+function updateStatsNone() {
+    const s = $('s-status');
+    s.textContent = '✗ 未検出'; s.className = 'val bad';
+    ['s-id', 's-margin', 's-size'].forEach(id => $(id).textContent = '-');
+}
+
+// ---- ボタン ----
+
+$('startBtn').onclick = () => init();
+
+$('recordBtn').onclick = () => {
+    const rate   = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
+    const id     = $('s-id').textContent;
+    const margin = $('s-margin').textContent;
+    const size   = $('s-size').textContent;
+    addLog(`検出率:${rate}% | ${id} | 信頼度:${margin} | サイズ:${size} | FPS:${fps}`);
+    detectCount = 0; trialCount = 0;
+};
+
+$('clearBtn').onclick = () => {
+    logEl.innerHTML = '';
+    detectCount = 0; trialCount = 0;
+};
+
+function addLog(msg) {
+    const el = document.createElement('div');
+    el.className = 'entry';
+    el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.prepend(el);
+}
+</script>
+</body>
+</html>
