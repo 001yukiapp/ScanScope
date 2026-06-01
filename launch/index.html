@@ -6,7 +6,7 @@
     <title>ScanScope Phase0 - AprilTag検証</title>
     <script>
     // バージョンが変わるとURLが変わり、キャッシュが自動で無効化される
-    const _V = 'v0.3.2';
+    const _V = 'v0.4.0';
     if (!location.search.includes(_V)) {
         location.replace(location.pathname + '?v=' + _V);
     }
@@ -77,7 +77,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.3.2</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.4.0</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -130,7 +130,8 @@
     </div>
 
     <div id="controls" style="bottom:172px;">
-        <button id="recordBtn">記録</button>
+        <button id="measureBtn">測定 5秒</button>
+        <button id="recordBtn" class="sec">記録</button>
         <button class="sec" id="clearBtn">クリア</button>
     </div>
 
@@ -568,6 +569,56 @@ function updateToe(detections) {
     pairEl.textContent = `#${A.id} ↔ #${B.id} | ピッチ:${toePitch.toFixed(2)}°`;
 
     pushToeHistory(toeYaw);
+
+    // 測定モード中ならサンプルを収集
+    if (measuring) measureSamples.push(toeYaw);
+}
+
+// ---- 測定モード（5秒間の平均化）----
+let measuring = false;
+let measureSamples = [];
+
+function startMeasure() {
+    if (measuring) return;
+    measuring = true;
+    measureSamples = [];
+    const btn = $('measureBtn');
+    btn.style.background = '#ff3b30';
+
+    const DURATION = 5000;
+    const t0 = performance.now();
+
+    const tick = () => {
+        const elapsed = performance.now() - t0;
+        const remain = Math.ceil((DURATION - elapsed) / 1000);
+        if (elapsed < DURATION) {
+            btn.textContent = `測定中 ${remain}`;
+            setTimeout(tick, 200);
+        } else {
+            finishMeasure();
+        }
+    };
+    tick();
+}
+
+function finishMeasure() {
+    measuring = false;
+    const btn = $('measureBtn');
+    btn.style.background = '';
+    btn.textContent = '測定 5秒';
+
+    const n = measureSamples.length;
+    if (n < 5) {
+        addLog(`測定失敗: サンプル ${n}個（2タグを映し続けて）`);
+        return;
+    }
+    const mean = measureSamples.reduce((s, v) => s + v, 0) / n;
+    const sd = Math.sqrt(measureSamples.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+    const sdMean = sd / Math.sqrt(n); // 平均値の標準誤差
+    const mn = Math.min(...measureSamples);
+    const mx = Math.max(...measureSamples);
+
+    addLog(`★測定 平均 ${mean.toFixed(2)}° ±${sdMean.toFixed(3)}°（σ${sd.toFixed(2)} N=${n} 範囲${mn.toFixed(1)}〜${mx.toFixed(1)}）`);
 }
 
 function updateStatsNone() {
@@ -579,6 +630,8 @@ function updateStatsNone() {
 // ---- ボタン ----
 
 $('startBtn').onclick = () => init();
+
+$('measureBtn').onclick = () => startMeasure();
 
 $('recordBtn').onclick = () => {
     const toe = $('s-toe').textContent;
