@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.1.1</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.0</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -98,10 +98,11 @@
         <div class="row"><span class="lbl">FPS</span><span class="val" id="s-fps">-</span></div>
         <div class="row"><span class="lbl">検出率</span><span class="val" id="s-rate">-</span></div>
         <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
-            <span class="lbl">キャンバー角</span><span class="val" id="s-camber" style="font-size:18px;">-</span>
+            <span class="lbl">相対ヨー（トー）</span><span class="val" id="s-toe" style="font-size:20px;">-</span>
         </div>
-        <div class="row"><span class="lbl" style="font-size:11px;">重力 g (cam)</span><span class="val" id="s-grav" style="font-size:11px;font-family:monospace;">-</span></div>
-        <div class="row"><span class="lbl" style="font-size:11px;">法線 n (cam)</span><span class="val" id="s-norm" style="font-size:11px;font-family:monospace;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">タグ対</span><span class="val" id="s-toepair" style="font-size:12px;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">相対ピッチ（参考）</span><span class="val" id="s-toepitch" style="font-size:12px;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">キャンバー（IMU・参考）</span><span class="val" id="s-camber" style="font-size:12px;">-</span></div>
     </div>
 
     <div id="controls">
@@ -283,15 +284,14 @@ async function runDetect() {
 
     if (detections.length > 0) {
         detectCount++;
-        // デバッグ：最初の1回だけ全フィールドをログ出力
-        if (detectCount === 1) {
-            addLog('RAW: ' + JSON.stringify(detections[0]));
-        }
         detections.forEach(d => drawTag(d));
         updateStats(detections[0]);
     } else {
         updateStatsNone();
     }
+
+    // トー（2タグ相対角）— カメラ非依存
+    updateToe(detections);
 
     const rate = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
     $('s-rate').textContent = `${detectCount} / ${trialCount}  (${rate}%)`;
@@ -384,36 +384,71 @@ function updateStats(d) {
 //   ホイール傾斜θ → 法線が水平からθ傾く → キャンバー θ°
 function updateCamber(d) {
     const camberEl = $('s-camber');
-    const gravEl   = $('s-grav');
-    const normEl   = $('s-norm');
-
     if (!d.pose || !d.pose.R) { camberEl.textContent = '-'; return; }
-    if (!gravOK) { camberEl.textContent = 'センサー待ち'; camberEl.className = 'val mid'; return; }
+    if (!gravOK) { camberEl.textContent = 'センサー待ち'; return; }
 
     const R = d.pose.R;
-    // タグz軸（法線）= Rの第3列
     let n = { x: R[0][2], y: R[1][2], z: R[2][2] };
     const nLen = Math.hypot(n.x, n.y, n.z) || 1;
     n.x /= nLen; n.y /= nLen; n.z /= nLen;
 
-    // 重力（カメラ座標、下向き）を正規化
     const g = gravityInCamera();
     const gLen = Math.hypot(g.x, g.y, g.z) || 1;
     const gh = { x: g.x / gLen, y: g.y / gLen, z: g.z / gLen };
 
-    // 法線の鉛直成分 = sin(キャンバー)
     let dot = n.x * gh.x + n.y * gh.y + n.z * gh.z;
     dot = Math.max(-1, Math.min(1, dot));
     const camber = Math.asin(dot) * 180 / Math.PI;
-
     camberEl.textContent = camber.toFixed(2) + '°';
-    camberEl.className = 'val good';
+}
 
-    // デバッグ表示
-    gravEl.textContent = `${gh.x.toFixed(2)},${gh.y.toFixed(2)},${gh.z.toFixed(2)}`;
-    normEl.textContent = `${n.x.toFixed(2)},${n.y.toFixed(2)},${n.z.toFixed(2)}`;
+// ---- トー（2タグの相対角）の計算 ----
+// 原理: 2つのタグの相対回転 R_A^T · R_B はカメラの動きが相殺され不変。
+//   タグBの法線をタグAの座標系で表し、A基準の水平面(x-z)上の回転角を取る。
+//   = 2輪の相対的な向きの差 = トーの本質。カメラを動かしても変わらないはず。
+//
+// AprilTagタグ座標系: x=右, y=下, z=法線(面の外向き)
+//   → タグが垂直なホイールに付くと y軸=鉛直。x-z平面=水平。
+//   → トー(ヨー) = A座標系でのBの法線の atan2(x, z)
+//   → 相対ピッチ(キャンバー差) = atan2(y, z)
+function updateToe(detections) {
+    const toeEl   = $('s-toe');
+    const pairEl  = $('s-toepair');
+    const pitchEl = $('s-toepitch');
 
-    window._lastCamber = camber;
+    // pose.R を持つ検出だけ抽出、ID昇順で安定化
+    const withPose = detections
+        .filter(d => d.pose && d.pose.R)
+        .sort((a, b) => a.id - b.id);
+
+    if (withPose.length < 2) {
+        toeEl.textContent = '2タグ必要';
+        toeEl.className = 'val mid';
+        pairEl.textContent = `検出 ${withPose.length} 個`;
+        pitchEl.textContent = '-';
+        return;
+    }
+
+    const A = withPose[0], B = withPose[1];
+    const RA = A.pose.R, RB = B.pose.R;
+
+    // Bの法線（カメラ座標）= RBの第3列
+    const nB = [RB[0][2], RB[1][2], RB[2][2]];
+
+    // A座標系へ: n_in_A = RA^T · nB  →  (RA^T)[i][j]=RA[j][i]
+    const nA = [
+        RA[0][0]*nB[0] + RA[1][0]*nB[1] + RA[2][0]*nB[2],
+        RA[0][1]*nB[0] + RA[1][1]*nB[1] + RA[2][1]*nB[2],
+        RA[0][2]*nB[0] + RA[1][2]*nB[1] + RA[2][2]*nB[2],
+    ];
+
+    const toeYaw   = Math.atan2(nA[0], nA[2]) * 180 / Math.PI; // 水平面の回転
+    const toePitch = Math.atan2(nA[1], nA[2]) * 180 / Math.PI; // 鉛直面（キャンバー差）
+
+    toeEl.textContent = toeYaw.toFixed(2) + '°';
+    toeEl.className = 'val good';
+    pairEl.textContent = `#${A.id} ↔ #${B.id}`;
+    pitchEl.textContent = toePitch.toFixed(2) + '°';
 }
 
 function updateStatsNone() {
@@ -427,12 +462,10 @@ function updateStatsNone() {
 $('startBtn').onclick = () => init();
 
 $('recordBtn').onclick = () => {
-    const rate   = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
-    const id     = $('s-id').textContent;
-    const dist   = $('s-margin').textContent;
-    const camber = $('s-camber').textContent;
-    addLog(`${id} | 距離:${dist} | キャンバー:${camber} | 検出率:${rate}% | FPS:${fps}`);
-    detectCount = 0; trialCount = 0;
+    const toe   = $('s-toe').textContent;
+    const pair  = $('s-toepair').textContent;
+    const pitch = $('s-toepitch').textContent;
+    addLog(`トー:${toe} | ${pair} | ピッチ:${pitch} | FPS:${fps}`);
 };
 
 $('clearBtn').onclick = () => {
