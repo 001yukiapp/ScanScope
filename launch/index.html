@@ -70,8 +70,14 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.3</p>
-    <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。<br>HTTPS環境が必要です。</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.4</p>
+    <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <label style="color:#888;font-size:14px;">タグサイズ</label>
+        <input id="tagSizeInput" type="number" value="40" min="5" max="200"
+            style="width:70px;padding:6px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:15px;text-align:center;">
+        <span style="color:#888;font-size:14px;">mm</span>
+    </div>
     <button id="startBtn">カメラ起動</button>
 </div>
 
@@ -166,7 +172,17 @@ async function startCamera() {
 
     // iPhone 14 Pro 後カメラ（広角）の近似内部パラメータ
     // 1920x1080 想定。fx≈fy≈1450, cx=960, cy=540
-    await detector.set_camera_info(1450, 1450, 960, 540);
+    // fx/fy: 実測キャリブレーション値（iPhone 14 Pro 広角、portrait）
+    // 15cm@241px と 120cm@30px から逆算 → fx≈1243
+    const cx = video.videoWidth  / 2;
+    const cy = video.videoHeight / 2;
+    await detector.set_camera_info(1243, 1243, cx, cy);
+
+    // タグサイズ設定（mm→m）、ID 0〜10に適用
+    const tagSizeM = (parseFloat($('tagSizeInput').value) || 40) / 1000;
+    for (let i = 0; i <= 10; i++) {
+        await detector.set_tag_size(i, tagSizeM);
+    }
 
     $('loading').style.display = 'none';
     $('main').style.display = 'block';
