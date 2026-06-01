@@ -6,7 +6,7 @@
     <title>ScanScope Phase0 - AprilTag検証</title>
     <script>
     // バージョンが変わるとURLが変わり、キャッシュが自動で無効化される
-    const _V = 'v0.4.1';
+    const _V = 'v0.5.0';
     if (!location.search.includes(_V)) {
         location.replace(location.pathname + '?v=' + _V);
     }
@@ -77,7 +77,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.4.1</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.5.0</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -200,9 +200,7 @@ const offCtx    = offscreen.getContext('2d', { willReadFrequently: true });
 // ---- 初期化 ----
 
 async function init() {
-    // 重力センサー許可（startBtnタップのユーザー操作内で呼ぶ必要あり）
-    await enableMotion();
-
+    // キャンバー(カメラ方式)は廃止したため重力センサーは未使用
     $('start-screen').style.display = 'none';
     $('loading').style.display = 'flex';
 
@@ -222,7 +220,9 @@ async function init() {
         const _detect  = Module.cwrap('atagjs_detect', 'number', []);
 
         _init();
-        _setOpt(2.0, 0.0, 1, 1, 0, 1, 1);
+        // decimate=1.0（全解像度・精度優先）, sigma, nthreads, refine_edges,
+        // max_detections=0, return_pose=1, return_solutions=1（asol＝代替解を返す）
+        _setOpt(1.0, 0.0, 1, 1, 0, 1, 1);
 
         detector = {
             set_camera_info: (fx, fy, cx, cy) => _setPose(fx, fy, cx, cy),
@@ -521,56 +521,121 @@ function updateToeStats() {
     sdEl.className = 'val ' + (sd < 1 ? 'good' : sd < 3 ? 'mid' : 'bad');
 }
 
-// ---- トー（2タグの相対角）の計算 ----
-// 原理: 2つのタグの相対回転 R_A^T · R_B はカメラの動きが相殺され不変。
-//   タグBの法線をタグAの座標系で表し、A基準の水平面(x-z)上の回転角を取る。
-//   = 2輪の相対的な向きの差 = トーの本質。カメラを動かしても変わらないはず。
-//
-// AprilTagタグ座標系: x=右, y=下, z=法線(面の外向き)
-//   → タグが垂直なホイールに付くと y軸=鉛直。x-z平面=水平。
-//   → トー(ヨー) = A座標系でのBの法線の atan2(x, z)
-//   → 相対ピッチ(キャンバー差) = atan2(y, z)
-function updateToe(detections) {
-    const toeEl   = $('s-toe');
-    const pairEl  = $('s-toepair');
-    const pitchEl = $('s-toepitch') || {};
+// ---- トー計算のヘルパー群 ----
+const MIN_TAG_PX = 80;   // これ未満のタグは精度不足として除外
 
-    // pose.R を持つ検出だけ抽出、ID昇順で安定化
-    const withPose = detections
-        .filter(d => d.pose && d.pose.R)
-        .sort((a, b) => a.id - b.id);
-
-    if (withPose.length < 2) {
-        toeEl.textContent = '2タグ必要';
-        toeEl.className = 'val mid';
-        pairEl.textContent = `検出 ${withPose.length} 個`;
-        pitchEl.textContent = '-';
-        return;
+// タグの1辺の平均ピクセル長
+function tagPx(d) {
+    const c = d.corners;
+    if (!c || c.length < 4) return 0;
+    let sum = 0;
+    for (let i = 0; i < 4; i++) {
+        const a = c[i], b = c[(i + 1) % 4];
+        sum += Math.hypot(b.x - a.x, b.y - a.y);
     }
+    return sum / 4;
+}
 
-    const A = withPose[0], B = withPose[1];
-    const RA = A.pose.R, RB = B.pose.R;
+// タグのポーズ候補（primary + 代替解asol）。flip ambiguity対策用。
+function solsOf(d) {
+    const out = [];
+    if (d.pose && d.pose.R) out.push(d.pose.R);
+    if (d.pose && d.pose.asol && d.pose.asol.R) out.push(d.pose.asol.R);
+    return out;
+}
 
-    // Bの法線（カメラ座標）= RBの第3列
-    const nB = [RB[0][2], RB[1][2], RB[2][2]];
-
-    // A座標系へ: n_in_A = RA^T · nB  →  (RA^T)[i][j]=RA[j][i]
-    const nA = [
+// RA基準でRBの相対ヨー/ピッチを返す（度）
+function toeAngles(RA, RB) {
+    const nB = [RB[0][2], RB[1][2], RB[2][2]];          // Bの法線（カメラ座標）
+    const nA = [                                         // A座標系へ: RA^T · nB
         RA[0][0]*nB[0] + RA[1][0]*nB[1] + RA[2][0]*nB[2],
         RA[0][1]*nB[0] + RA[1][1]*nB[1] + RA[2][1]*nB[2],
         RA[0][2]*nB[0] + RA[1][2]*nB[1] + RA[2][2]*nB[2],
     ];
+    return {
+        yaw:   Math.atan2(nA[0], nA[2]) * 180 / Math.PI,
+        pitch: Math.atan2(nA[1], nA[2]) * 180 / Math.PI,
+    };
+}
 
-    const toeYaw   = Math.atan2(nA[0], nA[2]) * 180 / Math.PI; // 水平面の回転
-    const toePitch = Math.atan2(nA[1], nA[2]) * 180 / Math.PI; // 鉛直面（キャンバー差）
+// 正面度から見た視野角（0°=真正面=不安定, 大きいほど斜め=安定）
+function viewAngleDeg(d) {
+    const R = d.pose.R;
+    const nz = Math.abs(R[2][2]); // 法線z成分の絶対値（1で真正面）
+    return Math.acos(Math.min(1, nz)) * 180 / Math.PI;
+}
+
+// 配列の中央値（非破壊）
+function medianOf(arr) {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    return med(s);
+}
+
+// 直近の参照値（flip解の選択基準）= toeHistory末尾30の中央値
+function recentToeRef() {
+    if (toeHistory.length === 0) return null;
+    const tail = toeHistory.slice(-30).map(p => p.v);
+    return medianOf(tail);
+}
+
+// ---- トー（複数タグ・flip対策・品質ゲート込み）----
+function updateToe(detections) {
+    const toeEl  = $('s-toe');
+    const pairEl = $('s-toepair');
+
+    // pose.R があり、かつ十分大きいタグだけ採用
+    const usable = detections
+        .filter(d => d.pose && d.pose.R && tagPx(d) >= MIN_TAG_PX)
+        .sort((a, b) => tagPx(b) - tagPx(a)); // 大きい順（最大を基準に）
+
+    if (usable.length < 2) {
+        const total = detections.filter(d => d.pose && d.pose.R).length;
+        toeEl.textContent = '2タグ必要';
+        toeEl.className = 'val mid';
+        pairEl.textContent = `検出${total} / 有効${usable.length}（小タグ除外）`;
+        return;
+    }
+
+    const ref = usable[0];                 // 基準＝最大タグ
+    const RAcands = solsOf(ref);
+    const target = recentToeRef();         // flip解の選択基準
+
+    // 基準以外の各タグについて、最も安定な相対ヨーを1つ選ぶ
+    const yaws = [], pitches = [];
+    for (let i = 1; i < usable.length; i++) {
+        const other = usable[i];
+        const RBcands = solsOf(other);
+        let best = null;
+        for (const RA of RAcands) {
+            for (const RB of RBcands) {
+                const ang = toeAngles(RA, RB);
+                if (best === null) { best = ang; continue; }
+                // 参照値があればそれに近い解、無ければ絶対値が小さい解を優先
+                const cur = target != null ? Math.abs(ang.yaw - target) : Math.abs(ang.yaw);
+                const bst = target != null ? Math.abs(best.yaw - target) : Math.abs(best.yaw);
+                if (cur < bst) best = ang;
+            }
+        }
+        yaws.push(best.yaw);
+        pitches.push(best.pitch);
+    }
+
+    // 複数タグの相対角を中央値で統合（同一平面なら全部ほぼ同じ値→ノイズ低減）
+    const toeYaw   = medianOf(yaws);
+    const toePitch = medianOf(pitches);
+    const va = viewAngleDeg(ref);
 
     toeEl.textContent = toeYaw.toFixed(2) + '°';
     toeEl.className = 'val good';
-    pairEl.textContent = `#${A.id} ↔ #${B.id} | ピッチ:${toePitch.toFixed(2)}°`;
+
+    // 視野角が小さい＝真正面すぎ＝不安定。警告色。
+    const frontal = va < 15;
+    pairEl.innerHTML = `基準#${ref.id} 視角${va.toFixed(0)}°`
+        + (frontal ? ' <span style="color:#ff6b6b">⚠正面すぎ</span>' : '')
+        + ` ピッチ${toePitch.toFixed(2)}°`;
 
     pushToeHistory(toeYaw);
-
-    // 測定モード中ならサンプルを収集
     if (measuring) measureSamples.push(toeYaw);
 }
 
