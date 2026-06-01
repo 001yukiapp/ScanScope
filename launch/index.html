@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.1</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.2</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -308,7 +308,7 @@ async function runDetect() {
     }
 
     // トー（2タグ相対角）— カメラ非依存
-    updateToe(detections);
+    try { updateToe(detections); } catch(e) { console.warn('toe error:', e); }
 
     const rate = trialCount > 0 ? Math.round(detectCount / trialCount * 100) : 0;
     $('s-rate').textContent = `${detectCount} / ${trialCount}  (${rate}%)`;
@@ -442,7 +442,8 @@ function movingAvg(arr, i, win) {
 }
 
 function drawToeGraph() {
-    const W = gCanvas.offsetWidth * window.devicePixelRatio;
+    const cssW = gCanvas.offsetWidth || (window.innerWidth - 48);
+    const W = cssW * window.devicePixelRatio;
     const H = 80 * window.devicePixelRatio;
     gCanvas.width  = W;
     gCanvas.height = H;
