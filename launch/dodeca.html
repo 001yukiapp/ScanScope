@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.1.0';
+    const _V = 'd0.2.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,10 +41,12 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.1.0</p>
-    <p>2個の正十二面体ターゲットの<br>相対トー角を測定します。<br><br>
-       ホイールA = ID 0〜10<br>ホイールB = ID 11〜21<br><br>
-       初回は各ターゲットを回して<br>キャリブレーションが必要です。</p>
+    <p style="color:#555;">d0.2.0</p>
+    <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
+       前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
+       ① 各ターゲットを回してキャリブ<br>
+       ② 調整前に「ゼロ点設定」<br>
+       ③ 調整後に測定 → Δが変化量</p>
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">タグサイズ</label>
         <input id="tagSizeInput" type="number" value="40" min="5" max="200">
@@ -61,16 +63,17 @@
 
     <div id="panel">
         <div class="row"><span class="lbl">状態</span><span class="val" id="s-status">-</span></div>
-        <div class="row"><span class="lbl">A 面数 / 学習済</span><span class="val" id="s-a">-</span></div>
-        <div class="row"><span class="lbl">B 面数 / 学習済</span><span class="val" id="s-b">-</span></div>
+        <div class="row"><span class="lbl">前 面数 / 学習済</span><span class="val" id="s-a">-</span></div>
+        <div class="row"><span class="lbl">後 面数 / 学習済</span><span class="val" id="s-b">-</span></div>
         <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
-            <span class="lbl">トー（A↔B）</span>
-            <span style="display:flex;align-items:baseline;gap:8px;">
-                <span class="val" id="s-toe" style="font-size:20px;">-</span>
-                <span style="font-size:11px;color:#888;">σ<span id="s-toe-sd">-</span></span>
-            </span>
+            <span class="lbl">Δトー（変化量）</span>
+            <span class="val" id="s-delta" style="font-size:22px;">-</span>
         </div>
-        <div class="row"><span class="lbl" style="font-size:11px;">統合残差（A / B）</span><span class="val" id="s-resid" style="font-size:11px;">-</span></div>
+        <div class="row">
+            <span class="lbl" style="font-size:11px;">絶対トー / σ</span>
+            <span style="font-size:12px;"><span class="val" id="s-toe">-</span> <span style="color:#888;">σ<span id="s-toe-sd">-</span></span></span>
+        </div>
+        <div class="row"><span class="lbl" style="font-size:11px;">ゼロ点 / 残差(前/後)</span><span class="val" id="s-resid" style="font-size:11px;">-</span></div>
     </div>
 
     <div id="graph-wrap">
@@ -82,8 +85,10 @@
 
     <div id="controls">
         <button id="calibBtn" class="warn">キャリブ開始</button>
+        <button id="zeroBtn">ゼロ点設定</button>
         <button id="measureBtn">測定5秒</button>
         <button id="recordBtn" class="sec">記録</button>
+        <button id="zeroClrBtn" class="sec">ゼロ解除</button>
         <button id="resetBtn" class="sec">学習消去</button>
     </div>
 
@@ -109,6 +114,11 @@ function groupOf(id) { return id < ID_SPLIT ? 'A' : 'B'; }
 // 本体フレーム = そのグループで最初に基準にしたタグのフレーム
 let model = loadModel();             // { A:{ref, Q:{id:R}}, B:{ref, Q:{id:R}} }
 let calibrating = false;
+
+// ゼロ点（基準トー）。取付クロッキングの影響を消し、変化量Δを測るため。
+let baseline = loadBaseline();       // number | null
+function loadBaseline(){ const s=localStorage.getItem('scanscope_dodeca_baseline'); return s!=null?parseFloat(s):null; }
+function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_dodeca_baseline'); else localStorage.setItem('scanscope_dodeca_baseline',String(baseline)); }
 
 function loadModel() {
     try {
@@ -324,15 +334,25 @@ function doMeasure(groups){
         : `<span class="good">測定中</span> FPS${fps}`;
 
     if(!a||!b){
-        $('s-toe').textContent = (a?'B':'A')+'が必要';
-        $('s-toe').className='val mid';
-        $('s-resid').textContent='-';
+        $('s-delta').textContent = (a?'後':'前')+'が必要';
+        $('s-delta').className='val mid';
+        $('s-toe').textContent='-'; $('s-resid').textContent='-';
         return;
     }
     const toe=toeYawBetween(a.R,b.R);
     $('s-toe').textContent=toe.toFixed(2)+'°';
-    $('s-toe').className='val good';
-    $('s-resid').textContent=`${a.residual.toFixed(2)}° / ${b.residual.toFixed(2)}°（面 ${a.faces}+${b.faces}）`;
+
+    // Δ＝変化量（ゼロ点基準）
+    const dEl=$('s-delta');
+    if(baseline!=null){
+        const d=toe-baseline;
+        dEl.textContent=(d>=0?'+':'')+d.toFixed(2)+'°';
+        dEl.className='val good';
+    }else{
+        dEl.textContent='ゼロ点未設定';
+        dEl.className='val mid';
+    }
+    $('s-resid').textContent=`${baseline!=null?baseline.toFixed(2)+'°':'未'} / ${a.residual.toFixed(2)}・${b.residual.toFixed(2)}°`;
 
     pushHist(toe);
     if(measuring) measureSamples.push(toe);
@@ -403,7 +423,18 @@ function finishMeasure(){
     const kept=measureSamples.filter(v=>Math.abs(v-m)<=th);
     const n=kept.length, mean=kept.reduce((s,v)=>s+v,0)/n;
     const sd=Math.sqrt(kept.reduce((s,v)=>s+(v-mean)**2,0)/n);
-    addLog(`★トー ${mean.toFixed(2)}° ±${(sd/Math.sqrt(n)).toFixed(3)}°（中央${m.toFixed(2)} σ${sd.toFixed(2)} 採用${n}/${nRaw}）`);
+    const se=sd/Math.sqrt(n);
+    const dStr = baseline!=null ? ` ｜ Δ${(mean-baseline>=0?'+':'')}${(mean-baseline).toFixed(2)}°` : '';
+    addLog(`★トー ${mean.toFixed(2)}° ±${se.toFixed(3)}°${dStr}（σ${sd.toFixed(2)} 採用${n}/${nRaw}）`);
+    return { mean, se };
+}
+
+// ゼロ点設定：直近の安定値（中央値）を基準に採用
+function setZero(){
+    if(hist.length<10){ addLog('ゼロ点失敗: もう少し映してから'); return; }
+    baseline = medOf(hist.slice(-60));
+    saveBaseline();
+    addLog(`ゼロ点設定: ${baseline.toFixed(2)}°（以後はここからのΔを表示）`);
 }
 
 function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
@@ -417,8 +448,10 @@ $('calibBtn').onclick=()=>{
         addLog('キャリブ開始: A・Bを順に回して全面を見せる');
     } else finishCalibrate();
 };
+$('zeroBtn').onclick=()=>setZero();
+$('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点を解除しました'); };
 $('measureBtn').onclick=()=>startMeasure();
-$('recordBtn').onclick=()=>{ addLog(`トー:${$('s-toe').textContent} σ:${$('s-toe-sd').textContent} 残差A/B:${$('s-resid').textContent}`); };
+$('recordBtn').onclick=()=>{ addLog(`Δ:${$('s-delta').textContent} 絶対:${$('s-toe').textContent} σ:${$('s-toe-sd').textContent}`); };
 $('resetBtn').onclick=()=>{ model={A:{ref:null,Q:{}},B:{ref:null,Q:{}}}; saveModel(); addLog('学習モデルを消去しました'); };
 </script>
 </body>
