@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ScanScope 正十二面体モード</title>
+    <script>
+    // バージョン付きURLでキャッシュ自動無効化
+    const _V = 'd0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; height:100svh; overflow:hidden; }
+        #start-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:0 24px; text-align:center; }
+        #start-screen h1 { font-size:22px; }
+        #start-screen p { color:#888; font-size:13px; line-height:1.7; }
+        #main { position:absolute; inset:0; display:none; }
+        video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        canvas#overlay { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+        #panel { position:absolute; top:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:12px 14px; }
+        .row { display:flex; justify-content:space-between; padding:2px 0; font-size:13px; }
+        .lbl { color:#888; }
+        .val { font-weight:600; }
+        .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
+        #graph-wrap { position:absolute; left:10px; right:10px; top:250px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:8px 10px; }
+        #toe-graph { width:100%; display:block; border-radius:8px; }
+        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:150px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
+        .entry { border-bottom:1px solid #222; padding:2px 0; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        button.warn { background:#ff9500; }
+        #loading { position:absolute; inset:0; background:#111; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+        .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        input { width:54px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <h1>ScanScope 正十二面体モード</h1>
+    <p style="color:#555;">d0.1.0</p>
+    <p>2個の正十二面体ターゲットの<br>相対トー角を測定します。<br><br>
+       ホイールA = ID 0〜10<br>ホイールB = ID 11〜21<br><br>
+       初回は各ターゲットを回して<br>キャリブレーションが必要です。</p>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <label style="color:#888;font-size:13px;">タグサイズ</label>
+        <input id="tagSizeInput" type="number" value="40" min="5" max="200">
+        <span style="color:#888;font-size:13px;">mm</span>
+    </div>
+    <button id="startBtn">カメラ起動</button>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg" style="color:#888;">WASM読み込み中...</p></div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row"><span class="lbl">状態</span><span class="val" id="s-status">-</span></div>
+        <div class="row"><span class="lbl">A 面数 / 学習済</span><span class="val" id="s-a">-</span></div>
+        <div class="row"><span class="lbl">B 面数 / 学習済</span><span class="val" id="s-b">-</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl">トー（A↔B）</span>
+            <span style="display:flex;align-items:baseline;gap:8px;">
+                <span class="val" id="s-toe" style="font-size:20px;">-</span>
+                <span style="font-size:11px;color:#888;">σ<span id="s-toe-sd">-</span></span>
+            </span>
+        </div>
+        <div class="row"><span class="lbl" style="font-size:11px;">統合残差（A / B）</span><span class="val" id="s-resid" style="font-size:11px;">-</span></div>
+    </div>
+
+    <div id="graph-wrap">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;margin-bottom:4px;">
+            <span>トー時系列</span><span id="g-range">-</span>
+        </div>
+        <canvas id="toe-graph" height="70"></canvas>
+    </div>
+
+    <div id="controls">
+        <button id="calibBtn" class="warn">キャリブ開始</button>
+        <button id="measureBtn">測定5秒</button>
+        <button id="recordBtn" class="sec">記録</button>
+        <button id="resetBtn" class="sec">学習消去</button>
+    </div>
+
+    <div id="log-panel"></div>
+</div>
+
+<script src="./apriltag_wasm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d'), logEl = $('log-panel');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
+
+let detector = null;
+let frameCount = 0, fps = 0, lastFpsTime = performance.now();
+
+// ===== グループ分け（どのIDがどちらのホイールか）=====
+const ID_SPLIT = 11;                 // id < 11 → A、それ以上 → B
+function groupOf(id) { return id < ID_SPLIT ? 'A' : 'B'; }
+
+// ===== 剛体モデル（自己キャリブレーションで学習）=====
+// Qrel[id] = この面タグ→グループ本体フレーム の回転（3x3 行優先）
+// 本体フレーム = そのグループで最初に基準にしたタグのフレーム
+let model = loadModel();             // { A:{ref, Q:{id:R}}, B:{ref, Q:{id:R}} }
+let calibrating = false;
+
+function loadModel() {
+    try {
+        const s = localStorage.getItem('scanscope_dodeca_model');
+        if (s) return JSON.parse(s);
+    } catch(e) {}
+    return { A:{ ref:null, Q:{} }, B:{ ref:null, Q:{} } };
+}
+function saveModel() {
+    localStorage.setItem('scanscope_dodeca_model', JSON.stringify(model));
+}
+
+// ===== 行列・クォータニオン ユーティリティ（R は行優先 3x3）=====
+function matT(R){ return [[R[0][0],R[1][0],R[2][0]],[R[0][1],R[1][1],R[2][1]],[R[0][2],R[1][2],R[2][2]]]; }
+function matMul(A,B){
+    const C=[[0,0,0],[0,0,0],[0,0,0]];
+    for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=A[i][k]*B[k][j];C[i][j]=s;}
+    return C;
+}
+function matToQuat(R){
+    const t=R[0][0]+R[1][1]+R[2][2]; let q;
+    if(t>0){const s=Math.sqrt(t+1)*2; q=[0.25*s,(R[2][1]-R[1][2])/s,(R[0][2]-R[2][0])/s,(R[1][0]-R[0][1])/s];}
+    else if(R[0][0]>R[1][1]&&R[0][0]>R[2][2]){const s=Math.sqrt(1+R[0][0]-R[1][1]-R[2][2])*2; q=[(R[2][1]-R[1][2])/s,0.25*s,(R[0][1]+R[1][0])/s,(R[0][2]+R[2][0])/s];}
+    else if(R[1][1]>R[2][2]){const s=Math.sqrt(1+R[1][1]-R[0][0]-R[2][2])*2; q=[(R[0][2]-R[2][0])/s,(R[0][1]+R[1][0])/s,0.25*s,(R[1][2]+R[2][1])/s];}
+    else {const s=Math.sqrt(1+R[2][2]-R[0][0]-R[1][1])*2; q=[(R[1][0]-R[0][1])/s,(R[0][2]+R[2][0])/s,(R[1][2]+R[2][1])/s,0.25*s];}
+    return qNorm(q); // [w,x,y,z]
+}
+function quatToMat(q){
+    const [w,x,y,z]=q;
+    return [
+        [1-2*(y*y+z*z), 2*(x*y-w*z),   2*(x*z+w*y)],
+        [2*(x*y+w*z),   1-2*(x*x+z*z), 2*(y*z-w*x)],
+        [2*(x*z-w*y),   2*(y*z+w*x),   1-2*(x*x+y*y)],
+    ];
+}
+function qNorm(q){ const n=Math.hypot(q[0],q[1],q[2],q[3])||1; return [q[0]/n,q[1]/n,q[2]/n,q[3]/n]; }
+function qDot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3]; }
+// クォータニオン平均（符号を揃えて線形平均→正規化。近接回転で十分）
+function quatAvg(list){
+    if(list.length===0) return null;
+    const q0=list[0]; let acc=[0,0,0,0];
+    for(let q of list){ if(qDot(q,q0)<0) q=[-q[0],-q[1],-q[2],-q[3]]; for(let i=0;i<4;i++)acc[i]+=q[i]; }
+    return qNorm(acc);
+}
+// 2つの回転の角度差（度）
+function angBetween(Ra,Rb){
+    const M=matMul(matT(Ra),Rb);
+    const tr=M[0][0]+M[1][1]+M[2][2];
+    return Math.acos(Math.max(-1,Math.min(1,(tr-1)/2)))*180/Math.PI;
+}
+
+// ===== トー（2本体の相対ヨー）=====
+function toeYawBetween(Ra,Rb){
+    // Rb本体のz軸法線をRa本体フレームへ
+    const nB=[Rb[0][2],Rb[1][2],Rb[2][2]];
+    const nA=[
+        Ra[0][0]*nB[0]+Ra[1][0]*nB[1]+Ra[2][0]*nB[2],
+        Ra[0][1]*nB[0]+Ra[1][1]*nB[1]+Ra[2][1]*nB[2],
+        Ra[0][2]*nB[0]+Ra[1][2]*nB[1]+Ra[2][2]*nB[2],
+    ];
+    return Math.atan2(nA[0],nA[2])*180/Math.PI;
+}
+
+// ===== タグ品質 =====
+const MIN_TAG_PX = 70;
+function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+
+// ===== 初期化 =====
+async function init(){
+    $('start-screen').style.display='none';
+    $('loading').style.display='flex';
+    try{
+        const Module=await AprilTagWasm();
+        const _init=Module.cwrap('atagjs_init','number',[]);
+        const _setOpt=Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose=Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf=Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize=Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect=Module.cwrap('atagjs_detect','number',[]);
+        _init();
+        _setOpt(1.0,0.0,1,1,0,1,1);
+        detector={
+            set_camera_info:(fx,fy,cx,cy)=>_setPose(fx,fy,cx,cy),
+            set_tag_size:(id,sz)=>_setSize(id,sz),
+            detect:(g,w,h)=>{
+                const buf=_setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr=_detect(); const len=Module.getValue(ptr,'i32');
+                if(len===0) return [];
+                const sp=Module.getValue(ptr+4,'i32');
+                const view=new Uint8Array(Module.HEAP8.buffer,sp,len);
+                let j=''; for(let i=0;i<len;i++) j+=String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        $('loading-msg').textContent='カメラ起動中...';
+        await startCamera();
+    }catch(e){ $('loading-msg').textContent='エラー: '+e.message; console.error(e); }
+}
+
+async function startCamera(){
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    video.srcObject=stream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+    detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
+    const sz=(parseFloat($('tagSizeInput').value)||40)/1000;
+    for(let i=0;i<=21;i++) detector.set_tag_size(i,sz);
+    $('loading').style.display='none';
+    $('main').style.display='block';
+    requestAnimationFrame(loop);
+}
+
+// ===== メインループ =====
+function loop(){
+    try{
+        frameCount++;
+        const now=performance.now();
+        if(now-lastFpsTime>=1000){ fps=frameCount; frameCount=0; lastFpsTime=now; }
+        if(video.readyState>=2) process();
+    }catch(e){ console.warn(e); }
+    finally{ requestAnimationFrame(loop); }
+}
+
+function process(){
+    const W=video.videoWidth,H=video.videoHeight;
+    offscreen.width=W; offscreen.height=H;
+    offCtx.drawImage(video,0,0);
+    const img=offCtx.getImageData(0,0,W,H);
+    const gray=new Uint8Array(W*H);
+    for(let i=0;i<gray.length;i++) gray[i]=(img.data[i*4]*77+img.data[i*4+1]*151+img.data[i*4+2]*28)>>8;
+
+    let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+
+    ctx.clearRect(0,0,W,H);
+    const usable=dets.filter(d=>d.pose&&d.pose.R&&tagPx(d)>=MIN_TAG_PX);
+    usable.forEach(drawTag);
+
+    // グループ分け
+    const groups={A:[],B:[]};
+    usable.forEach(d=>groups[groupOf(d.id)].push(d));
+
+    if(calibrating){ doCalibrate(groups); }
+    doMeasure(groups);
+}
+
+// ===== キャリブレーション =====
+// 各グループで基準タグ(ref)を決め、ref と同時に見えた他タグjの
+// Qj = Rref^T · Rj を蓄積平均して剛体モデルを学習。
+const calibAcc = { A:{}, B:{} };  // id -> [quat,...]
+function doCalibrate(groups){
+    for(const g of ['A','B']){
+        const list=groups[g];
+        if(list.length<1) continue;
+        // ref = モデル既定 or その場の最小ID
+        if(model[g].ref==null) model[g].ref=Math.min(...list.map(d=>d.id));
+        const refDet=list.find(d=>d.id===model[g].ref);
+        if(!refDet) continue;                       // refが見えてないフレームは学習スキップ
+        const Rref=refDet.pose.R;
+        model[g].Q[model[g].ref]=[[1,0,0],[0,1,0],[0,0,1]]; // ref は単位
+        for(const d of list){
+            if(d.id===model[g].ref) continue;
+            const Qj=matMul(matT(Rref),d.pose.R);   // tagj→body(ref)
+            (calibAcc[g][d.id]=calibAcc[g][d.id]||[]).push(matToQuat(Qj));
+        }
+    }
+}
+
+function finishCalibrate(){
+    calibrating=false;
+    $('calibBtn').textContent='キャリブ開始';
+    $('calibBtn').className='warn';
+    let learned=0;
+    for(const g of ['A','B']){
+        for(const id in calibAcc[g]){
+            const q=quatAvg(calibAcc[g][id]);
+            if(q){ model[g].Q[id]=quatToMat(q); learned++; }
+        }
+    }
+    saveModel();
+    addLog(`キャリブ完了: 追加学習 ${learned} 面（A基準#${model.A.ref} B基準#${model.B.ref}）`);
+    calibAcc.A={}; calibAcc.B={};
+}
+
+// ===== 多面統合：見えている面から本体姿勢を推定 =====
+// 各面 i について R_body_cam_i = R_i · Q_i^T を作り、回転平均。
+// 戻り値 { R, residual(度), faces }
+function fuseBody(g, list){
+    const Q=model[g].Q;
+    const ests=[];
+    for(const d of list){
+        const Qi=Q[d.id]; if(!Qi) continue;          // 未学習の面は使わない
+        ests.push(matMul(d.pose.R, matT(Qi)));        // body→cam 推定
+    }
+    if(ests.length===0) return null;
+    const qAvg=quatAvg(ests.map(matToQuat));
+    const Ravg=quatToMat(qAvg);
+    // 残差 = 各推定と平均の角度差の平均（統合の整合度）
+    let resid=0; for(const R of ests) resid+=angBetween(Ravg,R);
+    resid/=ests.length;
+    return { R:Ravg, residual:resid, faces:ests.length };
+}
+
+// ===== 測定（トー算出）=====
+let measuring=false, measureSamples=[];
+function doMeasure(groups){
+    const a=fuseBody('A',groups.A);
+    const b=fuseBody('B',groups.B);
+
+    $('s-a').textContent = `${groups.A.length} 面 / 学習${Object.keys(model.A.Q).length}`;
+    $('s-b').textContent = `${groups.B.length} 面 / 学習${Object.keys(model.B.Q).length}`;
+    $('s-status').innerHTML = calibrating
+        ? '<span class="mid">キャリブ中…ターゲットを回す</span>'
+        : `<span class="good">測定中</span> FPS${fps}`;
+
+    if(!a||!b){
+        $('s-toe').textContent = (a?'B':'A')+'が必要';
+        $('s-toe').className='val mid';
+        $('s-resid').textContent='-';
+        return;
+    }
+    const toe=toeYawBetween(a.R,b.R);
+    $('s-toe').textContent=toe.toFixed(2)+'°';
+    $('s-toe').className='val good';
+    $('s-resid').textContent=`${a.residual.toFixed(2)}° / ${b.residual.toFixed(2)}°（面 ${a.faces}+${b.faces}）`;
+
+    pushHist(toe);
+    if(measuring) measureSamples.push(toe);
+}
+
+// ===== グラフ＆統計 =====
+const HIST=300, hist=[], MA=15;
+const gc=$('toe-graph'), gx=gc.getContext('2d');
+function pushHist(v){ hist.push(v); if(hist.length>HIST) hist.shift(); drawGraph(); liveStats(); }
+function med(s){ const m=s.length; return m? (m%2? s[(m-1)/2] : (s[m/2-1]+s[m/2])/2) : 0; }
+function medOf(a){ return med([...a].sort((x,y)=>x-y)); }
+function mAvg(i){ const st=Math.max(0,i-MA+1); let s=0; for(let j=st;j<=i;j++)s+=hist[j]; return s/(i-st+1); }
+function liveStats(){
+    const n=hist.length; if(n<2)return;
+    const avg=hist.reduce((s,v)=>s+v,0)/n;
+    const sd=Math.sqrt(hist.reduce((s,v)=>s+(v-avg)**2,0)/n);
+    const e=$('s-toe-sd'); e.textContent='±'+sd.toFixed(2)+'°';
+}
+function drawGraph(){
+    const cssW=gc.offsetWidth||(innerWidth-40);
+    const W=cssW*devicePixelRatio, H=70*devicePixelRatio;
+    gc.width=W; gc.height=H;
+    const n=hist.length; if(n<2)return;
+    const mn=Math.min(...hist),mx=Math.max(...hist),pad=Math.max((mx-mn)*0.2,2);
+    const yMin=mn-pad,yMax=mx+pad,yR=yMax-yMin||1;
+    const toY=v=>H-((v-yMin)/yR)*H, toX=i=>(i/(n-1))*W;
+    gx.fillStyle='#1a1a1a'; gx.fillRect(0,0,W,H);
+    const y0=toY(0); gx.strokeStyle='#333'; gx.setLineDash([4,4]); gx.beginPath(); gx.moveTo(0,y0); gx.lineTo(W,y0); gx.stroke(); gx.setLineDash([]);
+    gx.strokeStyle='#1a6b3c'; gx.lineWidth=1; gx.beginPath(); hist.forEach((v,i)=>i?gx.lineTo(toX(i),toY(v)):gx.moveTo(toX(i),toY(v))); gx.stroke();
+    gx.strokeStyle='#34d058'; gx.lineWidth=2.5*devicePixelRatio; gx.beginPath(); hist.forEach((_,i)=>{const a=mAvg(i); i?gx.lineTo(toX(i),toY(a)):gx.moveTo(toX(i),toY(a));}); gx.stroke();
+    $('g-range').textContent=`${yMin.toFixed(1)}°〜${yMax.toFixed(1)}°`;
+}
+
+// ===== 描画 =====
+function drawTag(d){
+    const c=d.corners, g=groupOf(d.id);
+    const learned = model[g].Q[d.id];
+    ctx.strokeStyle = learned ? '#34d058' : '#ff9500';  // 学習済=緑, 未学習=橙
+    ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
+    for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
+    ctx.fillStyle=learned?'#34d058':'#ff9500'; ctx.font='bold 13px -apple-system';
+    ctx.fillText(`${g}:${d.id}`, c[0].x+4, c[0].y-4);
+}
+
+// ===== 測定モード（5秒・中央値+MAD）=====
+function startMeasure(){
+    if(measuring)return;
+    if(Object.keys(model.A.Q).length<1||Object.keys(model.B.Q).length<1){ addLog('先にキャリブが必要（A・B両方）'); return; }
+    measuring=true; measureSamples=[];
+    const btn=$('measureBtn'); btn.style.background='#ff3b30';
+    const t0=performance.now();
+    const tick=()=>{
+        const el=performance.now()-t0;
+        if(el<5000){ btn.textContent=`測定 ${Math.ceil((5000-el)/1000)}`; setTimeout(tick,200); }
+        else finishMeasure();
+    };
+    tick();
+}
+function finishMeasure(){
+    measuring=false;
+    const btn=$('measureBtn'); btn.style.background=''; btn.textContent='測定5秒';
+    const nRaw=measureSamples.length;
+    if(nRaw<5){ addLog(`測定失敗: サンプル${nRaw}個`); return; }
+    const sorted=[...measureSamples].sort((a,b)=>a-b);
+    const m=med(sorted);
+    const mad=med(sorted.map(v=>Math.abs(v-m)).sort((a,b)=>a-b))*1.4826;
+    const th=Math.max(3*mad,1);
+    const kept=measureSamples.filter(v=>Math.abs(v-m)<=th);
+    const n=kept.length, mean=kept.reduce((s,v)=>s+v,0)/n;
+    const sd=Math.sqrt(kept.reduce((s,v)=>s+(v-mean)**2,0)/n);
+    addLog(`★トー ${mean.toFixed(2)}° ±${(sd/Math.sqrt(n)).toFixed(3)}°（中央${m.toFixed(2)} σ${sd.toFixed(2)} 採用${n}/${nRaw}）`);
+}
+
+function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
+
+// ===== ボタン =====
+$('startBtn').onclick=()=>init();
+$('calibBtn').onclick=()=>{
+    if(!calibrating){
+        calibrating=true; calibAcc.A={}; calibAcc.B={};
+        $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
+        addLog('キャリブ開始: A・Bを順に回して全面を見せる');
+    } else finishCalibrate();
+};
+$('measureBtn').onclick=()=>startMeasure();
+$('recordBtn').onclick=()=>{ addLog(`トー:${$('s-toe').textContent} σ:${$('s-toe-sd').textContent} 残差A/B:${$('s-resid').textContent}`); };
+$('resetBtn').onclick=()=>{ model={A:{ref:null,Q:{}},B:{ref:null,Q:{}}}; saveModel(); addLog('学習モデルを消去しました'); };
+</script>
+</body>
+</html>
