@@ -218,6 +218,10 @@ async function runDetect() {
 
     if (detections.length > 0) {
         detectCount++;
+        // デバッグ：最初の1回だけ全フィールドをログ出力
+        if (detectCount === 1) {
+            addLog('RAW: ' + JSON.stringify(detections[0]));
+        }
         detections.forEach(d => drawTag(d));
         updateStats(detections[0]);
     } else {
