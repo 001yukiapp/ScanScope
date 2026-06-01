@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.2</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.3</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。<br>HTTPS環境が必要です。</p>
     <button id="startBtn">カメラ起動</button>
 </div>
@@ -87,7 +87,7 @@
     <div id="panel">
         <div class="row"><span class="lbl">検出状態</span><span class="val" id="s-status">初期化中</span></div>
         <div class="row"><span class="lbl">タグID</span><span class="val" id="s-id">-</span></div>
-        <div class="row"><span class="lbl">信頼度</span><span class="val" id="s-margin">-</span></div>
+        <div class="row"><span class="lbl">推定距離</span><span class="val" id="s-margin">-</span></div>
         <div class="row"><span class="lbl">マーカーサイズ (px)</span><span class="val" id="s-size">-</span></div>
         <div class="row"><span class="lbl">FPS</span><span class="val" id="s-fps">-</span></div>
         <div class="row"><span class="lbl">検出率</span><span class="val" id="s-rate">-</span></div>
@@ -294,9 +294,15 @@ function updateStats(d) {
     $('s-id').textContent = `Tag #${d.id}`;
 
     const m = $('s-margin');
-    const margin = d.decision_margin || 0;
-    m.textContent = margin.toFixed(1);
-    m.className = 'val ' + (margin > 100 ? 'good' : margin > 50 ? 'mid' : 'bad');
+    if (d.pose && d.pose.t) {
+        const t = d.pose.t;
+        const dist = Math.sqrt(t[0]**2 + t[1]**2 + t[2]**2) * 100;
+        m.textContent = dist.toFixed(1) + ' cm';
+        m.className = 'val good';
+    } else {
+        m.textContent = '-';
+        m.className = 'val';
+    }
 
     if (d.corners) {
         const c = d.corners;
