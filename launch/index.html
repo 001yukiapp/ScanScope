@@ -20,7 +20,7 @@
         #start-screen p  { color: #888; font-size: 14px; text-align: center; line-height: 1.6; padding: 0 32px; }
         #main { position: absolute; inset: 0; display: none; }
         video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-        canvas#overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+        canvas#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
         #panel {
             position: absolute; top: 12px; left: 12px; right: 12px;
             background: rgba(0,0,0,0.75); backdrop-filter: blur(10px);
@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.1</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.0.2</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。<br>HTTPS環境が必要です。</p>
     <button id="startBtn">カメラ起動</button>
 </div>
