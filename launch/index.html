@@ -70,7 +70,7 @@
 
 <div id="start-screen">
     <h1>ScanScope Phase0</h1>
-    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.0</p>
+    <p style="color:#555;font-size:12px;margin-bottom:4px;">v0.2.1</p>
     <p>AprilTag 36h11 マーカーの<br>認識テストアプリです。<br><br>後カメラを使用します。</p>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:14px;">タグサイズ</label>
@@ -98,19 +98,36 @@
         <div class="row"><span class="lbl">FPS</span><span class="val" id="s-fps">-</span></div>
         <div class="row"><span class="lbl">検出率</span><span class="val" id="s-rate">-</span></div>
         <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
-            <span class="lbl">相対ヨー（トー）</span><span class="val" id="s-toe" style="font-size:20px;">-</span>
+            <span class="lbl">相対ヨー（トー）</span>
+            <span style="display:flex;align-items:baseline;gap:8px;">
+                <span class="val" id="s-toe" style="font-size:20px;">-</span>
+                <span style="font-size:11px;color:#888;">平均 <span id="s-toe-avg">-</span></span>
+            </span>
         </div>
-        <div class="row"><span class="lbl" style="font-size:11px;">タグ対</span><span class="val" id="s-toepair" style="font-size:12px;">-</span></div>
-        <div class="row"><span class="lbl" style="font-size:11px;">相対ピッチ（参考）</span><span class="val" id="s-toepitch" style="font-size:12px;">-</span></div>
-        <div class="row"><span class="lbl" style="font-size:11px;">キャンバー（IMU・参考）</span><span class="val" id="s-camber" style="font-size:12px;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">タグ対 / ピッチ</span><span class="val" id="s-toepair" style="font-size:12px;">-</span></div>
+        <div class="row"><span class="lbl" style="font-size:11px;">σ（ばらつき）</span><span class="val" id="s-toe-sd" style="font-size:12px;">-</span></div>
     </div>
 
-    <div id="controls">
+    <!-- トーグラフ -->
+    <div id="graph-wrap" style="
+        position:absolute; left:12px; right:12px;
+        top:320px;
+        background:rgba(0,0,0,0.75); backdrop-filter:blur(10px);
+        border-radius:16px; padding:10px 12px;
+    ">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;margin-bottom:4px;">
+            <span>トー時系列（10秒）</span>
+            <span id="g-range">-</span>
+        </div>
+        <canvas id="toe-graph" height="80" style="width:100%;display:block;border-radius:8px;"></canvas>
+    </div>
+
+    <div id="controls" style="bottom:172px;">
         <button id="recordBtn">記録</button>
         <button class="sec" id="clearBtn">クリア</button>
     </div>
 
-    <div id="log-panel"></div>
+    <div id="log-panel" style="bottom:12px;height:120px;"></div>
 </div>
 
 <!-- Comlink (Worker間通信ライブラリ) -->
@@ -402,6 +419,96 @@ function updateCamber(d) {
     camberEl.textContent = camber.toFixed(2) + '°';
 }
 
+// ---- トーグラフ ----
+const TOE_BUF = 300;   // 10秒 × 30fps
+const toeHistory = [];  // { t, v } の配列
+const MA_WIN = 15;      // 移動平均ウィンドウ（フレーム数）
+
+const gCanvas = $('toe-graph');
+const gCtx    = gCanvas.getContext('2d');
+
+function pushToeHistory(val) {
+    toeHistory.push({ t: performance.now(), v: val });
+    if (toeHistory.length > TOE_BUF) toeHistory.shift();
+    drawToeGraph();
+    updateToeStats();
+}
+
+function movingAvg(arr, i, win) {
+    const start = Math.max(0, i - win + 1);
+    let sum = 0;
+    for (let j = start; j <= i; j++) sum += arr[j].v;
+    return sum / (i - start + 1);
+}
+
+function drawToeGraph() {
+    const W = gCanvas.offsetWidth * window.devicePixelRatio;
+    const H = 80 * window.devicePixelRatio;
+    gCanvas.width  = W;
+    gCanvas.height = H;
+
+    const n = toeHistory.length;
+    if (n < 2) return;
+
+    // Y軸レンジ（自動、最低±3°）
+    const vals = toeHistory.map(p => p.v);
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    const pad = Math.max((mx - mn) * 0.2, 3);
+    const yMin = mn - pad, yMax = mx + pad;
+    const yRange = yMax - yMin || 1;
+
+    const toY = v => H - ((v - yMin) / yRange) * H;
+    const toX = i => (i / (n - 1)) * W;
+
+    // 背景
+    gCtx.fillStyle = '#1a1a1a';
+    gCtx.fillRect(0, 0, W, H);
+
+    // ゼロライン
+    const y0 = toY(0);
+    gCtx.strokeStyle = '#333';
+    gCtx.lineWidth = 1;
+    gCtx.setLineDash([4, 4]);
+    gCtx.beginPath(); gCtx.moveTo(0, y0); gCtx.lineTo(W, y0); gCtx.stroke();
+    gCtx.setLineDash([]);
+
+    // 生値
+    gCtx.strokeStyle = '#1a6b3c';
+    gCtx.lineWidth = 1;
+    gCtx.beginPath();
+    toeHistory.forEach((p, i) => {
+        i === 0 ? gCtx.moveTo(toX(i), toY(p.v)) : gCtx.lineTo(toX(i), toY(p.v));
+    });
+    gCtx.stroke();
+
+    // 移動平均
+    gCtx.strokeStyle = '#34d058';
+    gCtx.lineWidth = 2.5 * window.devicePixelRatio;
+    gCtx.beginPath();
+    toeHistory.forEach((_, i) => {
+        const avg = movingAvg(toeHistory, i, MA_WIN);
+        i === 0 ? gCtx.moveTo(toX(i), toY(avg)) : gCtx.lineTo(toX(i), toY(avg));
+    });
+    gCtx.stroke();
+
+    // レンジ表示
+    $('g-range').textContent = `${yMin.toFixed(1)}° 〜 ${yMax.toFixed(1)}°`;
+}
+
+function updateToeStats() {
+    const n = toeHistory.length;
+    if (n < 2) return;
+    const vals = toeHistory.map(p => p.v);
+    const avg = vals.reduce((s, v) => s + v, 0) / n;
+    const sd  = Math.sqrt(vals.reduce((s, v) => s + (v - avg) ** 2, 0) / n);
+    const lastAvg = movingAvg(toeHistory, n - 1, MA_WIN);
+
+    $('s-toe-avg').textContent = lastAvg.toFixed(2) + '°';
+    const sdEl = $('s-toe-sd');
+    sdEl.textContent = '±' + sd.toFixed(2) + '°';
+    sdEl.className = 'val ' + (sd < 1 ? 'good' : sd < 3 ? 'mid' : 'bad');
+}
+
 // ---- トー（2タグの相対角）の計算 ----
 // 原理: 2つのタグの相対回転 R_A^T · R_B はカメラの動きが相殺され不変。
 //   タグBの法線をタグAの座標系で表し、A基準の水平面(x-z)上の回転角を取る。
@@ -447,8 +554,9 @@ function updateToe(detections) {
 
     toeEl.textContent = toeYaw.toFixed(2) + '°';
     toeEl.className = 'val good';
-    pairEl.textContent = `#${A.id} ↔ #${B.id}`;
-    pitchEl.textContent = toePitch.toFixed(2) + '°';
+    pairEl.textContent = `#${A.id} ↔ #${B.id} | ピッチ:${toePitch.toFixed(2)}°`;
+
+    pushToeHistory(toeYaw);
 }
 
 function updateStatsNone() {
@@ -462,10 +570,11 @@ function updateStatsNone() {
 $('startBtn').onclick = () => init();
 
 $('recordBtn').onclick = () => {
-    const toe   = $('s-toe').textContent;
-    const pair  = $('s-toepair').textContent;
-    const pitch = $('s-toepitch').textContent;
-    addLog(`トー:${toe} | ${pair} | ピッチ:${pitch} | FPS:${fps}`);
+    const toe = $('s-toe').textContent;
+    const avg = $('s-toe-avg').textContent;
+    const sd  = $('s-toe-sd').textContent;
+    const pair = $('s-toepair').textContent;
+    addLog(`トー:${toe} 平均:${avg} σ:${sd} | ${pair} | FPS:${fps}`);
 };
 
 $('clearBtn').onclick = () => {
