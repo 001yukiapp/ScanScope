@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ScanScope タイル検品</title>
+    <script>
+    // バージョン付きURLでキャッシュ自動無効化
+    const _V = 't0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; height:100svh; overflow:hidden; }
+        #start-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:0 24px; text-align:center; }
+        #start-screen h1 { font-size:22px; }
+        #start-screen p { color:#888; font-size:13px; line-height:1.7; }
+        #main { position:absolute; inset:0; display:none; }
+        video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        canvas#overlay { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+        #panel { position:absolute; top:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:12px 14px; }
+        .row { display:flex; justify-content:space-between; align-items:center; padding:3px 0; font-size:13px; }
+        .lbl { color:#888; }
+        .val { font-weight:600; }
+        .big { font-size:20px; }
+        .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
+        .barwrap { flex:1; height:8px; background:#333; border-radius:4px; margin:0 8px; overflow:hidden; }
+        .bar { height:100%; width:0%; background:#34d058; transition:width .15s; }
+        #verdict { position:absolute; left:10px; right:10px; top:255px; background:rgba(0,0,0,0.85); backdrop-filter:blur(10px); border-radius:14px; padding:12px 14px; display:none; }
+        #verdict h2 { font-size:18px; margin-bottom:6px; }
+        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:150px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
+        .entry { border-bottom:1px solid #222; padding:2px 0; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        button.warn { background:#ff9500; }
+        #loading { position:absolute; inset:0; background:#111; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+        .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        input { width:60px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <h1>ScanScope タイル検品</h1>
+    <p style="color:#555;">t0.1.0</p>
+    <p>手塗りタイル1枚を、いろんな<b>距離・角度</b>でかざして<br>
+       検出が安定するか・誤読しないかを単品で検品します。<br>
+       足切り・キャリブなしの純粋な検出QCモード。</p>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <label style="color:#888;font-size:13px;">タグ黒部</label>
+        <input id="tagSizeInput" type="number" value="36" min="5" max="200">
+        <span style="color:#888;font-size:13px;">mm</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <label style="color:#888;font-size:13px;">想定ID（任意）</label>
+        <input id="expectIdInput" type="number" value="" min="0" max="21" placeholder="—">
+        <span style="color:#888;font-size:12px;">誤読チェック用</span>
+    </div>
+    <button id="startBtn">カメラ起動</button>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg" style="color:#888;">WASM読み込み中...</p></div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row"><span class="lbl">検出 / ID</span><span class="val big" id="s-det">—</span></div>
+        <div class="row"><span class="lbl">margin（信頼度）</span><div class="barwrap"><div class="bar" id="bar-margin"></div></div><span class="val" id="s-margin">—</span></div>
+        <div class="row"><span class="lbl">hamming（ビット訂正）</span><span class="val" id="s-ham">—</span></div>
+        <div class="row"><span class="lbl">タグ画素 / 推定距離</span><span class="val" id="s-px">—</span></div>
+        <div class="row"><span class="lbl">傾き（面の正対=0°）</span><span class="val" id="s-tilt">—</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl">検出率（直近60フレーム）</span><div class="barwrap"><div class="bar" id="bar-rate"></div></div><span class="val" id="s-rate">—</span>
+        </div>
+    </div>
+
+    <div id="verdict"></div>
+
+    <div id="controls">
+        <button id="qcBtn" class="warn">検品5秒</button>
+        <button id="fieldsBtn" class="sec">項目確認</button>
+        <button id="clrBtn" class="sec">ログ消去</button>
+    </div>
+
+    <div id="log-panel"></div>
+</div>
+
+<script src="./apriltag_wasm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d'), logEl = $('log-panel');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
+
+let detector = null;
+let frameCount = 0, fps = 0, lastFpsTime = performance.now();
+let fieldsDumped = false;
+
+// ===== 検出結果フィールドの吸収（実装差を吸収）=====
+function getMargin(d){ const v = d.margin ?? d.decision_margin ?? d.dm ?? d.goodness; return (typeof v==='number')?v:null; }
+function getHamming(d){ const v = d.hamming ?? d.h; return (typeof v==='number')?v:null; }
+function poseR(d){ return (d.pose && d.pose.R) ? d.pose.R : null; }
+function poseT(d){
+    if(!d.pose || !d.pose.t) return null;
+    const t=d.pose.t;
+    return Array.isArray(t[0]) ? [t[0][0],t[1][0],t[2][0]] : [t[0],t[1],t[2]];
+}
+function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+// 面の傾き（正対=0°、エッジオン=90°）: タグ法線=R第3列のz成分
+function tiltDeg(R){ if(!R) return null; const nz=Math.abs(R[2][2]); return Math.acos(Math.max(0,Math.min(1,nz)))*180/Math.PI; }
+function distCm(t){ if(!t) return null; return Math.hypot(t[0],t[1],t[2])*100; }
+
+// ===== margin の色しきい（相対評価用の目安。絶対基準ではない）=====
+function marginColor(m){ if(m==null) return '#888'; if(m>=25) return '#34d058'; if(m>=12) return '#ffd700'; return '#ff6b6b'; }
+function marginPct(m){ if(m==null) return 0; return Math.max(0,Math.min(100, m/50*100)); } // 50で満タン表示
+
+// ===== 初期化 =====
+async function init(){
+    $('start-screen').style.display='none';
+    $('loading').style.display='flex';
+    try{
+        const Module=await AprilTagWasm();
+        const _init=Module.cwrap('atagjs_init','number',[]);
+        const _setOpt=Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose=Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf=Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize=Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect=Module.cwrap('atagjs_detect','number',[]);
+        _init();
+        _setOpt(1.0,0.0,1,1,0,1,1);   // decimate=1.0（精度優先・全解像度）
+        detector={
+            set_camera_info:(fx,fy,cx,cy)=>_setPose(fx,fy,cx,cy),
+            set_tag_size:(id,sz)=>_setSize(id,sz),
+            detect:(g,w,h)=>{
+                const buf=_setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr=_detect(); const len=Module.getValue(ptr,'i32');
+                if(len===0) return [];
+                const sp=Module.getValue(ptr+4,'i32');
+                const view=new Uint8Array(Module.HEAP8.buffer,sp,len);
+                let j=''; for(let i=0;i<len;i++) j+=String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        $('loading-msg').textContent='カメラ起動中...';
+        await startCamera();
+    }catch(e){ $('loading-msg').textContent='エラー: '+e.message; console.error(e); }
+}
+
+async function startCamera(){
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    video.srcObject=stream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+    detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
+    const sz=(parseFloat($('tagSizeInput').value)||36)/1000;
+    for(let i=0;i<=21;i++) detector.set_tag_size(i,sz);
+    addLog(`検品開始 タグ黒部=${(sz*1000).toFixed(0)}mm`);
+    $('loading').style.display='none';
+    $('main').style.display='block';
+    requestAnimationFrame(loop);
+}
+
+// ===== メインループ =====
+function loop(){
+    try{
+        frameCount++;
+        const now=performance.now();
+        if(now-lastFpsTime>=1000){ fps=frameCount; frameCount=0; lastFpsTime=now; }
+        if(video.readyState>=2) process();
+    }catch(e){ console.warn(e); }
+    finally{ requestAnimationFrame(loop); }
+}
+
+// ===== 検出率ローリング =====
+const RATE_N=60, rateBuf=[];
+function pushRate(hit){ rateBuf.push(hit?1:0); if(rateBuf.length>RATE_N) rateBuf.shift(); }
+function rate(){ if(!rateBuf.length) return 0; return rateBuf.reduce((s,v)=>s+v,0)/rateBuf.length*100; }
+
+// ===== 検品集計 =====
+let qc=null; // {t0, frames, hits, margins:[], hammings:[], dists:[], tilts:[], ids:{}, misread}
+
+function process(){
+    const W=video.videoWidth,H=video.videoHeight;
+    offscreen.width=W; offscreen.height=H;
+    offCtx.drawImage(video,0,0);
+    const img=offCtx.getImageData(0,0,W,H);
+    const gray=new Uint8Array(W*H);
+    for(let i=0;i<gray.length;i++) gray[i]=(img.data[i*4]*77+img.data[i*4+1]*151+img.data[i*4+2]*28)>>8;
+
+    let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+
+    // 初回だけ検出JSONの項目をログに出す（実装の実フィールド確認用）
+    if(!fieldsDumped && dets.length){ fieldsDumped=true; dumpFields(dets[0]); }
+
+    ctx.clearRect(0,0,W,H);
+
+    // 一番大きい検出を主役にする（単品検品想定）
+    let main=null, mainPx=0;
+    for(const d of dets){ if(!d.corners) continue; const px=tagPx(d); drawTag(d,px); if(px>mainPx){ mainPx=px; main=d; } }
+
+    const expect = $('expectIdInput').value!=='' ? parseInt($('expectIdInput').value) : null;
+    const hit = !!main;
+    pushRate(hit);
+
+    // ライブ表示
+    if(main){
+        const m=getMargin(main), ham=getHamming(main), R=poseR(main), t=poseT(main);
+        const d=distCm(t), tl=tiltDeg(R);
+        const misread = (expect!=null && main.id!==expect);
+        $('s-det').textContent = `✅ ${main.id}` + (misread?` ⚠誤読(想定${expect})`:'');
+        $('s-det').className = 'val big ' + (misread?'bad':'good');
+        $('s-margin').textContent = m!=null? m.toFixed(1) : 'n/a';
+        $('s-margin').style.color = marginColor(m);
+        $('bar-margin').style.width = marginPct(m)+'%';
+        $('bar-margin').style.background = marginColor(m);
+        $('s-ham').textContent = ham!=null? (ham===0?'0 ✓':ham+' ⚠') : 'n/a';
+        $('s-ham').className = 'val ' + (ham===0?'good':(ham==null?'':'mid'));
+        $('s-px').textContent = `${mainPx.toFixed(0)}px / ${d!=null?d.toFixed(0)+'cm':'—'}`;
+        $('s-tilt').textContent = tl!=null? tl.toFixed(0)+'°' : '—';
+    } else {
+        $('s-det').textContent='❌ 未検出'; $('s-det').className='val big bad';
+        $('s-margin').textContent='—'; $('bar-margin').style.width='0%';
+        $('s-ham').textContent='—'; $('s-px').textContent='—'; $('s-tilt').textContent='—';
+    }
+    const r=rate();
+    $('s-rate').textContent=r.toFixed(0)+'%';
+    $('bar-rate').style.width=r+'%';
+    $('bar-rate').style.background = r>=90?'#34d058':(r>=70?'#ffd700':'#ff6b6b');
+
+    // 検品集計中
+    if(qc){
+        qc.frames++;
+        if(main){
+            qc.hits++;
+            const m=getMargin(main), ham=getHamming(main), t=poseT(main), R=poseR(main);
+            if(m!=null) qc.margins.push(m);
+            if(ham!=null) qc.hammings.push(ham);
+            const dc=distCm(t); if(dc!=null) qc.dists.push(dc);
+            const tl=tiltDeg(R); if(tl!=null) qc.tilts.push(tl);
+            qc.ids[main.id]=(qc.ids[main.id]||0)+1;
+            if(expect!=null && main.id!==expect) qc.misread++;
+        }
+        if(performance.now()-qc.t0>=5000) finishQC(expect);
+    }
+}
+
+// ===== 描画 =====
+function drawTag(d,px){
+    const c=d.corners, m=getMargin(d);
+    const col = marginColor(m);
+    ctx.strokeStyle=col; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
+    for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
+    ctx.fillStyle=col; ctx.font='bold 14px -apple-system';
+    ctx.fillText(`#${d.id}${m!=null?' m'+m.toFixed(0):''}`, c[0].x+4, c[0].y-6);
+}
+
+// ===== 検品モード =====
+function startQC(){
+    if(qc) return;
+    qc={ t0:performance.now(), frames:0, hits:0, margins:[], hammings:[], dists:[], tilts:[], ids:{}, misread:0 };
+    $('qcBtn').style.background='#ff3b30'; $('qcBtn').textContent='検品中…';
+    $('verdict').style.display='none';
+    addLog('★検品開始: タイルを近〜遠・正面〜斜めに動かして');
+}
+function med(a){ if(!a.length) return null; const s=[...a].sort((x,y)=>x-y),n=s.length; return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2; }
+function finishQC(expect){
+    const q=qc; qc=null;
+    $('qcBtn').style.background=''; $('qcBtn').textContent='検品5秒';
+    const detRate = q.frames? q.hits/q.frames*100 : 0;
+    const mMin = q.margins.length? Math.min(...q.margins) : null;
+    const mMed = med(q.margins);
+    const hamMax = q.hammings.length? Math.max(...q.hammings) : null;
+    const dMax = q.dists.length? Math.max(...q.dists) : null;
+    const tMax = q.tilts.length? Math.max(...q.tilts) : null;
+    const idList = Object.keys(q.ids);
+
+    // 合否判定（margin絶対基準は実装依存なので、安定性と誤読を主軸に）
+    const reasons=[];
+    let pass=true;
+    if(detRate<90){ pass=false; reasons.push(`検出率${detRate.toFixed(0)}%（90%未満＝不安定）`); }
+    if(expect!=null && q.misread>0){ pass=false; reasons.push(`誤読${q.misread}回（想定ID${expect}と不一致）`); }
+    if(idList.length>1){ pass=false; reasons.push(`複数ID検出 [${idList.join(',')}]（誤読の疑い）`); }
+    if(hamMax!=null && hamMax>0){ reasons.push(`hamming最大${hamMax}（ビット訂正が発生＝コントラスト要注意）`); }
+    if(mMin!=null && mMin<12){ reasons.push(`margin最小${mMin.toFixed(1)}（低い＝塗り/つや要改善の可能性）`); }
+    if(q.hits===0){ pass=false; reasons.length=0; reasons.push('一度も検出されず'); }
+
+    const v=$('verdict');
+    v.style.display='block';
+    v.innerHTML = `<h2 class="${pass?'good':'bad'}">${pass?'✅ 合格':'❌ 要確認'}</h2>`
+      + `<div class="row"><span class="lbl">検出率</span><span class="val ${detRate>=90?'good':'bad'}">${detRate.toFixed(0)}% (${q.hits}/${q.frames})</span></div>`
+      + `<div class="row"><span class="lbl">読めたID</span><span class="val">${idList.length?idList.join(', '):'—'}</span></div>`
+      + `<div class="row"><span class="lbl">margin 最小/中央</span><span class="val">${mMin!=null?mMin.toFixed(1):'n/a'} / ${mMed!=null?mMed.toFixed(1):'n/a'}</span></div>`
+      + `<div class="row"><span class="lbl">hamming 最大</span><span class="val ${hamMax===0?'good':(hamMax==null?'':'mid')}">${hamMax!=null?hamMax:'n/a'}</span></div>`
+      + `<div class="row"><span class="lbl">最遠検出 / 最大傾き</span><span class="val">${dMax!=null?dMax.toFixed(0)+'cm':'—'} / ${tMax!=null?tMax.toFixed(0)+'°':'—'}</span></div>`
+      + (reasons.length? `<div style="margin-top:6px;font-size:12px;color:#ffd700;">${reasons.map(r=>'・'+r).join('<br>')}</div>`:'');
+
+    addLog(`検品結果: ${pass?'合格':'要確認'} 検出率${detRate.toFixed(0)}% ID[${idList.join(',')}] margin最小${mMin!=null?mMin.toFixed(1):'-'} ham最大${hamMax!=null?hamMax:'-'} 最遠${dMax!=null?dMax.toFixed(0):'-'}cm`);
+}
+
+function dumpFields(d){
+    const keys=Object.keys(d).join(', ');
+    const pkeys=d.pose?('pose{'+Object.keys(d.pose).join(',')+'}'):'pose:なし';
+    addLog(`検出項目: ${keys} ｜ ${pkeys}`);
+    addLog(`margin=${getMargin(d)} hamming=${getHamming(d)}（n/aなら未提供→検出率で代替判定）`);
+}
+
+function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
+
+// ===== ボタン =====
+$('startBtn').onclick=()=>init();
+$('qcBtn').onclick=()=>startQC();
+$('fieldsBtn').onclick=()=>{ fieldsDumped=false; addLog('次の検出で項目を再表示します'); };
+$('clrBtn').onclick=()=>{ logEl.innerHTML=''; };
+</script>
+</body>
+</html>
