@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.3.0';
+    const _V = 'd0.4.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,7 +41,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.3.0</p>
+    <p style="color:#555;">d0.4.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -169,6 +169,25 @@ function angBetween(Ra,Rb){
     const tr=M[0][0]+M[1][1]+M[2][2];
     return Math.acos(Math.max(-1,Math.min(1,(tr-1)/2)))*180/Math.PI;
 }
+function angBetweenQ(qa,qb){ return angBetween(quatToMat(qa),quatToMat(qb)); }
+// クォータニオン群を貪欲クラスタリング（反転＝別クラスタとして分離するため）
+function clusterQuats(quats, thDeg){
+    const clusters=[];
+    for(const q of quats){
+        let best=null, bestAng=thDeg;
+        for(const c of clusters){ const a=angBetweenQ(q,c.centroid); if(a<bestAng){ bestAng=a; best=c; } }
+        if(best){ best.members.push(q); best.centroid=quatAvg(best.members); }
+        else clusters.push({ members:[q], centroid:q });
+    }
+    clusters.sort((a,b)=>b.members.length-a.members.length);
+    return clusters;
+}
+// 最大クラスタ（＝反転を除いた優勢な解）の平均
+function dominantQuat(quats, thDeg){
+    const cl=clusterQuats(quats, thDeg);
+    if(cl.length===0) return null;
+    return { q:quatAvg(cl[0].members), n:cl[0].members.length, total:quats.length };
+}
 
 // ===== トー（2本体の相対ヨー）=====
 function toeYawBetween(Ra,Rb){
@@ -290,15 +309,15 @@ function finishCalibrate(){
     calibrating=false;
     $('calibBtn').textContent='キャリブ開始';
     $('calibBtn').className='warn';
-    let learned=0;
+    let learned=0, flipped=0;
     for(const g of ['A','B']){
         for(const id in calibAcc[g]){
-            const q=quatAvg(calibAcc[g][id]);
-            if(q){ model[g].Q[id]=quatToMat(q); learned++; }
+            const d=dominantQuat(calibAcc[g][id], 15);   // 反転フレームを除いた優勢解
+            if(d){ model[g].Q[id]=quatToMat(d.q); learned++; if(d.n<d.total*0.7) flipped++; }
         }
     }
     saveModel();
-    addLog(`キャリブ完了: 追加学習 ${learned} 面（A基準#${model.A.ref} B基準#${model.B.ref}）`);
+    addLog(`キャリブ完了: 学習 ${learned} 面（反転混入${flipped}面 A基準#${model.A.ref} B基準#${model.B.ref}）`);
     calibAcc.A={}; calibAcc.B={};
 }
 
@@ -307,23 +326,25 @@ function finishCalibrate(){
 // 戻り値 { R, residual(度), faces }
 function fuseBody(g, list){
     const Q=model[g].Q;
-    const ests=[];
+    const estsQ=[];
     for(const d of list){
-        const Qi=Q[d.id]; if(!Qi) continue;          // 未学習の面は使わない
-        ests.push(matMul(d.pose.R, matT(Qi)));        // body→cam 推定
+        const Qi=Q[d.id]; if(!Qi) continue;               // 未学習の面は使わない
+        estsQ.push(matToQuat(matMul(d.pose.R, matT(Qi)))); // body→cam 推定
     }
-    if(ests.length===0) return null;
-    const qAvg=quatAvg(ests.map(matToQuat));
-    const Ravg=quatToMat(qAvg);
-    // 残差 = 各推定と平均の角度差の平均（統合の整合度）
-    let resid=0; for(const R of ests) resid+=angBetween(Ravg,R);
-    resid/=ests.length;
-    // 食い違い = 面どうしの最大角度差（＝生の視点バイアスの大きさ・真値不要）
+    if(estsQ.length===0) return null;
+    // コンセンサス：最大クラスタだけ採用（反転した面を外れ値として棄却）
+    const cl=clusterQuats(estsQ, 15);
+    const used=cl[0].members;
+    const Ravg=quatToMat(quatAvg(used));
+    // 残差 = 採用面と平均の角度差の平均（統合の整合度）
+    let resid=0; for(const q of used) resid+=angBetweenQ(matToQuat(Ravg),q);
+    resid/=used.length;
+    // 食い違い = 採用面どうしの最大角度差
     let spread=0;
-    for(let i=0;i<ests.length;i++)for(let j=i+1;j<ests.length;j++){
-        const a=angBetween(ests[i],ests[j]); if(a>spread) spread=a;
+    for(let i=0;i<used.length;i++)for(let j=i+1;j<used.length;j++){
+        const a=angBetweenQ(used[i],used[j]); if(a>spread) spread=a;
     }
-    return { R:Ravg, residual:resid, spread, faces:ests.length };
+    return { R:Ravg, residual:resid, spread, faces:used.length, total:estsQ.length };
 }
 
 // ===== 単体診断：本体姿勢の時間ブレ（ノイズ床）=====
@@ -362,7 +383,7 @@ function doMeasure(groups){
             $('s-delta').className = est.faces>=2 ? 'val good' : 'val mid';
             $('s-toe').textContent = `食違${est.spread.toFixed(2)}°`;
             $('s-toe-sd').textContent = st!=null ? '/ブレ'+st.toFixed(2)+'°' : '';
-            $('s-resid').textContent = `残差${est.residual.toFixed(2)}° / 面${est.faces}`;
+            $('s-resid').textContent = `残差${est.residual.toFixed(2)}° / 面${est.faces}/${est.total}`;
             if(measuring) diagSamples.push({spread:est.spread,residual:est.residual,faces:est.faces,q:matToQuat(est.R)});
         }else{
             $('s-delta').textContent='ターゲットなし';
