@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="110" fill="white"/>
+  <text x="256" y="380" font-family="Arial Black,Helvetica,sans-serif" font-size="400" font-weight="900" text-anchor="middle" fill="black">S</text>
+  <ellipse cx="195" cy="175" rx="55" ry="32" fill="white" opacity="0.35" transform="rotate(-40 195 175)"/>
+</svg>

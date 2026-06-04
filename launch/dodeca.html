@@ -3,11 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>ScanScope 正十二面体モード</title>
+    <title>SS Dodeca</title>
+    <link rel="manifest" href="./manifest-dodeca.json">
+    <meta name="theme-color" content="#111111">
+    <link rel="apple-touch-icon" href="./icon.svg">
     <script>
-    // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.2.0';
-    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    const APP_VERSION = 'd0.2.0';
+    const TOOL_KEY = 'dodeca';
+    const VERSION_URL = 'https://001yukiapp.github.io/ScanScope/launch/version.json';
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
     </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -453,6 +457,41 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ addLog(`Δ:${$('s-delta').textContent} 絶対:${$('s-toe').textContent} σ:${$('s-toe-sd').textContent}`); };
 $('resetBtn').onclick=()=>{ model={A:{ref:null,Q:{}},B:{ref:null,Q:{}}}; saveModel(); addLog('学習モデルを消去しました'); };
+</script>
+<script>
+(function(){
+  const banner = document.createElement('div');
+  banner.id = 'update-banner';
+  Object.assign(banner.style, {
+    display:'none', position:'fixed', bottom:'12px', left:'50%',
+    transform:'translateX(-50%)', background:'#007aff', color:'#fff',
+    borderRadius:'24px', padding:'12px 24px', fontSize:'14px',
+    fontWeight:'600', zIndex:'9999', boxShadow:'0 4px 20px rgba(0,0,0,0.5)',
+    cursor:'pointer', whiteSpace:'nowrap'
+  });
+  banner.textContent = '🆕 アップデートあり - タップして更新';
+  document.body.appendChild(banner);
+  let _reloading = false;
+  banner.onclick = async () => {
+    banner.textContent = '更新中...';
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.addEventListener('message', e => {
+        if (e.data && e.data.type === 'UPDATE_DONE' && !_reloading) { _reloading = true; location.reload(); }
+      });
+      navigator.serviceWorker.controller.postMessage({ type: 'UPDATE_NOW' });
+      setTimeout(() => { if (!_reloading) { _reloading = true; location.reload(); } }, 4000);
+    } else { location.reload(); }
+  };
+  async function checkVersion() {
+    try {
+      const res = await fetch(VERSION_URL + '?t=' + Date.now());
+      const data = await res.json();
+      const latest = data[TOOL_KEY];
+      if (latest && latest !== APP_VERSION) banner.style.display = 'block';
+    } catch(e) {}
+  }
+  window.addEventListener('load', checkVersion);
+})();
 </script>
 </body>
 </html>
