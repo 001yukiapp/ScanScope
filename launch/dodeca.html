@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.8.0';
+    const _V = 'd0.9.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,7 +41,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.8.0</p>
+    <p style="color:#555;">d0.9.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -286,12 +286,12 @@ function process(){
 // ===== キャリブレーション =====
 // 各グループで基準タグ(ref)を決め、ref と同時に見えた他タグjの
 // Qj = Rref^T · Rj を蓄積平均して剛体モデルを学習。
-// タグの2つのポーズ候補（主解 + 第2解asol）。反転曖昧性の両解を返す。
+// タグのポーズ候補。解が曖昧(uniquesol=false)な時だけ第2解asolも返す。
+// 一意な時は主解を信頼（むやみに第2解を入れると確実な面を反転解に誤誘導するため）。
 function tagSolutions(d){
-    const sols=[d.pose.R];
-    const as=d.pose.asol;
-    if(as && as.R && angBetween(d.pose.R, as.R)>10) sols.push(as.R);  // 有意に違う時だけ第2解
-    return sols;
+    const p=d.pose, as=p.asol;
+    if(as && as.uniquesol===false && as.R && angBetween(p.R, as.R)>10) return [p.R, as.R];
+    return [p.R];
 }
 
 // 全ペア (i<j) の相対回転 Rrel = Ri^T·Rj = Mi^T·Mj（カメラ非依存・剛体不変）を蓄積。
@@ -359,7 +359,14 @@ function finishCalibrate(){
             }
         }
         model[g].ref=root; model[g].Q=Q;
-        msg.push(`${g}:基準#${root} ${inTree.size}/${nodes.size}面 弱辺${weak}`);
+        // 整合度：学習Qが観測した全ペア相対回転をどれだけ満たすか（小さいほど良い）
+        let qres=0, qn=0;
+        for(const k in edges){ const e=edges[k]; if(!Q[e.i]||!Q[e.j]) continue;
+            const pred=matMul(matT(Q[e.i]),Q[e.j]);      // Q_i^T·Q_j = Mi^T·Mj
+            qres+=angBetween(pred, quatToMat(e.q)); qn++;
+        }
+        const fit=qn?(qres/qn):0;
+        msg.push(`${g}:基準#${root} ${inTree.size}/${nodes.size}面 弱辺${weak} 整合${fit.toFixed(1)}°`);
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')}`);
