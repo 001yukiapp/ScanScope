@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>SS Camber検証</title>
     <script>
-    const _V = 'c0.2.1';
+    const _V = 'c0.3.0';
     // SWキャッシュ回避：camber.htmlはSW管理外だがsw.jsがfetch横取りする場合に備えてno-cache指定
     if(navigator.serviceWorker && navigator.serviceWorker.controller){
         fetch(location.href, {cache:'no-store'}).then(r=>r.text()).then(html=>{
@@ -140,10 +140,12 @@ function norm(v){ const m=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/m,v[1]/m,v
 // タグ法線（カメラ座標）= R の第3列
 function tagNormalCam(R){ return norm([R[0][2], R[1][2], R[2][2]]); }
 
-// デバイス座標 → カメラ座標
-// iPhoneの背面カメラ縦持ち: デバイスX=カメラX、デバイスY=-カメラY、デバイスZ=-カメラZ
-// ただし軸対応はデバッグモードで実測して確認する
-function gravToCamera(g){ return [g.x, -g.y, -g.z]; }
+// デバイス座標 → カメラ座標（実測で確認済み）
+// iPhone背面カメラ縦持ち: 重力=-Y(デバイス) → カメラの「下」=+Y(カメラ)
+// iPhone背面カメラ横持ち: 重力=-Z(デバイス) → カメラの「下」=+Z(カメラ)
+// 背面カメラはデバイス-Z方向を向いている（スクリーンが+Z）
+// デバイスX→カメラX, デバイスY→カメラY, デバイスZ→-カメラZ（前後反転）
+function gravToCamera(g){ return [g.x, g.y, -g.z]; }
 // デバッグ用：生の重力値をログに出す
 function logGravRaw(){ if(gravity) addLog(`重力生値: x=${gravity.x.toFixed(3)} y=${gravity.y.toFixed(3)} z=${gravity.z.toFixed(3)}`); }
 
