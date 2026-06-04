@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.4.0';
+    const _V = 'd0.5.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,7 +41,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.4.0</p>
+    <p style="color:#555;">d0.5.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -286,21 +286,18 @@ function process(){
 // ===== キャリブレーション =====
 // 各グループで基準タグ(ref)を決め、ref と同時に見えた他タグjの
 // Qj = Rref^T · Rj を蓄積平均して剛体モデルを学習。
-const calibAcc = { A:{}, B:{} };  // id -> [quat,...]
+// 全ペア (i<j) の相対回転 Rrel = Ri^T·Rj = Mi^T·Mj（カメラ非依存・剛体不変）を蓄積。
+// 単一の基準タグに依存せず、信頼できる辺だけで剛体グラフを組む。
+const calibPair = { A:{}, B:{} };  // "i,j" -> [quat(Rrel),...]
 function doCalibrate(groups){
     for(const g of ['A','B']){
-        const list=groups[g];
-        if(list.length<1) continue;
-        // ref = モデル既定 or その場の最小ID
-        if(model[g].ref==null) model[g].ref=Math.min(...list.map(d=>d.id));
-        const refDet=list.find(d=>d.id===model[g].ref);
-        if(!refDet) continue;                       // refが見えてないフレームは学習スキップ
-        const Rref=refDet.pose.R;
-        model[g].Q[model[g].ref]=[[1,0,0],[0,1,0],[0,0,1]]; // ref は単位
-        for(const d of list){
-            if(d.id===model[g].ref) continue;
-            const Qj=matMul(matT(Rref),d.pose.R);   // tagj→body(ref)
-            (calibAcc[g][d.id]=calibAcc[g][d.id]||[]).push(matToQuat(Qj));
+        const list=groups[g].filter(d=>d.pose&&d.pose.R);
+        for(let a=0;a<list.length;a++)for(let b=a+1;b<list.length;b++){
+            let i=list[a].id, j=list[b].id, Ri=list[a].pose.R, Rj=list[b].pose.R;
+            if(i>j){ [i,j]=[j,i]; [Ri,Rj]=[Rj,Ri]; }
+            const Rrel=matMul(matT(Ri),Rj);          // Mi^T·Mj
+            const key=i+','+j;
+            (calibPair[g][key]=calibPair[g][key]||[]).push(matToQuat(Rrel));
         }
     }
 }
@@ -309,16 +306,44 @@ function finishCalibrate(){
     calibrating=false;
     $('calibBtn').textContent='キャリブ開始';
     $('calibBtn').className='warn';
-    let learned=0, flipped=0;
+    let msg=[];
     for(const g of ['A','B']){
-        for(const id in calibAcc[g]){
-            const d=dominantQuat(calibAcc[g][id], 15);   // 反転フレームを除いた優勢解
-            if(d){ model[g].Q[id]=quatToMat(d.q); learned++; if(d.n<d.total*0.7) flipped++; }
+        // 1) 各ペアの相対回転を優勢クラスタで頑健推定
+        const edges={}, nodes=new Set();
+        for(const key in calibPair[g]){
+            const d=dominantQuat(calibPair[g][key], 15);
+            if(!d) continue;
+            const [i,j]=key.split(',').map(Number);
+            edges[key]={i,j,q:d.q,conf:d.n,frac:d.n/d.total};
+            nodes.add(i); nodes.add(j);
         }
+        if(nodes.size===0) continue;
+        // 2) 隣接・ルート選定（最も信頼の総和が大きいタグを基準に）
+        const adj={};
+        for(const k in edges){ const e=edges[k]; (adj[e.i]=adj[e.i]||[]).push(e); (adj[e.j]=adj[e.j]||[]).push(e); }
+        let root=null, rootScore=-1;
+        for(const n of nodes){ let s=0; for(const e of (adj[n]||[])) s+=e.conf; if(s>rootScore){ rootScore=s; root=n; } }
+        // 3) 信頼の高い辺から張る（Prim法）→ Q[id]=Mroot^T·Mid
+        const Q={}; Q[root]=[[1,0,0],[0,1,0],[0,0,1]];
+        const inTree=new Set([root]);
+        let weak=0;
+        while(inTree.size<nodes.size){
+            let best=null;
+            for(const k in edges){ const e=edges[k]; const iIn=inTree.has(e.i), jIn=inTree.has(e.j);
+                if(iIn!==jIn && (!best||e.conf>best.conf)) best=e; }
+            if(!best) break;                          // グラフが分断 → 残りは学習不可
+            const from=inTree.has(best.i)?best.i:best.j, to=(from===best.i)?best.j:best.i;
+            const Rrel = (from<to) ? quatToMat(best.q) : matT(quatToMat(best.q));
+            Q[to]=matMul(Q[from],Rrel);
+            inTree.add(to);
+            if(best.frac<0.7) weak++;
+        }
+        model[g].ref=root; model[g].Q=Q;
+        msg.push(`${g}:基準#${root} ${inTree.size}/${nodes.size}面 弱辺${weak}`);
     }
     saveModel();
-    addLog(`キャリブ完了: 学習 ${learned} 面（反転混入${flipped}面 A基準#${model.A.ref} B基準#${model.B.ref}）`);
-    calibAcc.A={}; calibAcc.B={};
+    addLog(`キャリブ完了 ${msg.join(' / ')}`);
+    calibPair.A={}; calibPair.B={};
 }
 
 // ===== 多面統合：見えている面から本体姿勢を推定 =====
@@ -506,7 +531,7 @@ function addLog(msg){ const e=document.createElement('div'); e.className='entry'
 $('startBtn').onclick=()=>init();
 $('calibBtn').onclick=()=>{
     if(!calibrating){
-        calibrating=true; calibAcc.A={}; calibAcc.B={};
+        calibrating=true; calibPair.A={}; calibPair.B={};
         $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
         addLog('キャリブ開始: A・Bを順に回して全面を見せる');
     } else finishCalibrate();
