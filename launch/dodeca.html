@@ -3,15 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>SS Dodeca</title>
-    <link rel="manifest" href="./manifest-dodeca.json">
-    <meta name="theme-color" content="#111111">
-    <link rel="apple-touch-icon" href="./icon.svg">
+    <title>ScanScope 正十二面体モード</title>
     <script>
-    const APP_VERSION = 'd0.2.1';
-    const TOOL_KEY = 'dodeca';
-    const VERSION_URL = 'https://001yukiapp.github.io/ScanScope/launch/version.json';
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
+    // バージョン付きURLでキャッシュ自動無効化
+    const _V = 'd0.3.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -45,9 +41,9 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.2.0</p>
+    <p style="color:#555;">d0.3.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       前ターゲット = ID 1〜11<br>後ターゲット = ID 12〜22（暫定）<br><br>
+       前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
        ③ 調整後に測定 → Δが変化量</p>
@@ -110,7 +106,7 @@ let detector = null;
 let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 
 // ===== グループ分け（どのIDがどちらのホイールか）=====
-const ID_SPLIT = 12;                 // id < 12 → A（ID 1〜11）、それ以上 → B
+const ID_SPLIT = 11;                 // id < 11 → A、それ以上 → B
 function groupOf(id) { return id < ID_SPLIT ? 'A' : 'B'; }
 
 // ===== 剛体モデル（自己キャリブレーションで学習）=====
@@ -322,11 +318,27 @@ function fuseBody(g, list){
     // 残差 = 各推定と平均の角度差の平均（統合の整合度）
     let resid=0; for(const R of ests) resid+=angBetween(Ravg,R);
     resid/=ests.length;
-    return { R:Ravg, residual:resid, faces:ests.length };
+    // 食い違い = 面どうしの最大角度差（＝生の視点バイアスの大きさ・真値不要）
+    let spread=0;
+    for(let i=0;i<ests.length;i++)for(let j=i+1;j<ests.length;j++){
+        const a=angBetween(ests[i],ests[j]); if(a>spread) spread=a;
+    }
+    return { R:Ravg, residual:resid, spread, faces:ests.length };
+}
+
+// ===== 単体診断：本体姿勢の時間ブレ（ノイズ床）=====
+// カメラ・ターゲットを止めた状態での統合姿勢のゆらぎ＝測定の再現性。
+const bodyHist={ A:[], B:[] }, BODY_HIST=60;
+function pushBody(g,R){ const arr=bodyHist[g]; arr.push(matToQuat(R)); if(arr.length>BODY_HIST) arr.shift(); }
+function bodyStability(g){
+    const arr=bodyHist[g]; if(arr.length<5) return null;
+    const Ravg=quatToMat(quatAvg(arr));
+    let s=0; for(const q of arr) s+=angBetween(Ravg,quatToMat(q));
+    return s/arr.length;
 }
 
 // ===== 測定（トー算出）=====
-let measuring=false, measureSamples=[];
+let measuring=false, measureSamples=[], diagSamples=[];
 function doMeasure(groups){
     const a=fuseBody('A',groups.A);
     const b=fuseBody('B',groups.B);
@@ -337,10 +349,26 @@ function doMeasure(groups){
         ? '<span class="mid">キャリブ中…ターゲットを回す</span>'
         : `<span class="good">測定中</span> FPS${fps}`;
 
+    // 単体診断：本体姿勢の時間ブレを追跡（片側だけ映っていても回す）
+    if(a) pushBody('A',a.R); else bodyHist.A.length=0;
+    if(b) pushBody('B',b.R); else bodyHist.B.length=0;
+
     if(!a||!b){
-        $('s-delta').textContent = (a?'後':'前')+'が必要';
-        $('s-delta').className='val mid';
-        $('s-toe').textContent='-'; $('s-resid').textContent='-';
+        // 片側だけ → 単体診断モード（1個のドデカで視点バイアスを直接測る）
+        const g=a?'A':(b?'B':null), est=a||b;
+        if(est){
+            const st=bodyStability(g);
+            $('s-delta').textContent = est.faces>=2 ? `${est.faces}面統合` : '1面のみ';
+            $('s-delta').className = est.faces>=2 ? 'val good' : 'val mid';
+            $('s-toe').textContent = `食違${est.spread.toFixed(2)}°`;
+            $('s-toe-sd').textContent = st!=null ? '/ブレ'+st.toFixed(2)+'°' : '';
+            $('s-resid').textContent = `残差${est.residual.toFixed(2)}° / 面${est.faces}`;
+            if(measuring) diagSamples.push({spread:est.spread,residual:est.residual,faces:est.faces,q:matToQuat(est.R)});
+        }else{
+            $('s-delta').textContent='ターゲットなし';
+            $('s-delta').className='val mid';
+            $('s-toe').textContent='-'; $('s-toe-sd').textContent='-'; $('s-resid').textContent='-';
+        }
         return;
     }
     const toe=toeYawBetween(a.R,b.R);
@@ -404,8 +432,8 @@ function drawTag(d){
 // ===== 測定モード（5秒・中央値+MAD）=====
 function startMeasure(){
     if(measuring)return;
-    if(Object.keys(model.A.Q).length<1||Object.keys(model.B.Q).length<1){ addLog('先にキャリブが必要（A・B両方）'); return; }
-    measuring=true; measureSamples=[];
+    if(Object.keys(model.A.Q).length<1&&Object.keys(model.B.Q).length<1){ addLog('先にキャリブが必要'); return; }
+    measuring=true; measureSamples=[]; diagSamples=[];
     const btn=$('measureBtn'); btn.style.background='#ff3b30';
     const t0=performance.now();
     const tick=()=>{
@@ -419,7 +447,17 @@ function finishMeasure(){
     measuring=false;
     const btn=$('measureBtn'); btn.style.background=''; btn.textContent='測定5秒';
     const nRaw=measureSamples.length;
-    if(nRaw<5){ addLog(`測定失敗: サンプル${nRaw}個`); return; }
+    if(nRaw<5){
+        // 単体診断モードの集計（1個のドデカ・トー算出なし）
+        if(diagSamples.length>=5){
+            const mean=a=>a.reduce((x,y)=>x+y,0)/a.length;
+            const sp=diagSamples.map(s=>s.spread), rs=diagSamples.map(s=>s.residual), fc=diagSamples.map(s=>s.faces);
+            const Ravg=quatToMat(quatAvg(diagSamples.map(s=>s.q)));
+            let bs=0; for(const s of diagSamples) bs+=angBetween(Ravg,quatToMat(s.q)); bs/=diagSamples.length;
+            addLog(`★単体 面${Math.min(...fc)}〜${Math.max(...fc)} 食違${mean(sp).toFixed(2)}° 残差${mean(rs).toFixed(2)}° 本体ブレ${bs.toFixed(2)}°（n${diagSamples.length}）`);
+        } else addLog(`測定失敗: サンプル${nRaw}個`);
+        return;
+    }
     const sorted=[...measureSamples].sort((a,b)=>a-b);
     const m=med(sorted);
     const mad=med(sorted.map(v=>Math.abs(v-m)).sort((a,b)=>a-b))*1.4826;
@@ -457,41 +495,6 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ addLog(`Δ:${$('s-delta').textContent} 絶対:${$('s-toe').textContent} σ:${$('s-toe-sd').textContent}`); };
 $('resetBtn').onclick=()=>{ model={A:{ref:null,Q:{}},B:{ref:null,Q:{}}}; saveModel(); addLog('学習モデルを消去しました'); };
-</script>
-<script>
-(function(){
-  const banner = document.createElement('div');
-  banner.id = 'update-banner';
-  Object.assign(banner.style, {
-    display:'none', position:'fixed', bottom:'12px', left:'50%',
-    transform:'translateX(-50%)', background:'#007aff', color:'#fff',
-    borderRadius:'24px', padding:'12px 24px', fontSize:'14px',
-    fontWeight:'600', zIndex:'9999', boxShadow:'0 4px 20px rgba(0,0,0,0.5)',
-    cursor:'pointer', whiteSpace:'nowrap'
-  });
-  banner.textContent = '🆕 アップデートあり - タップして更新';
-  document.body.appendChild(banner);
-  let _reloading = false;
-  banner.onclick = async () => {
-    banner.textContent = '更新中...';
-    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.addEventListener('message', e => {
-        if (e.data && e.data.type === 'UPDATE_DONE' && !_reloading) { _reloading = true; location.reload(); }
-      });
-      navigator.serviceWorker.controller.postMessage({ type: 'UPDATE_NOW' });
-      setTimeout(() => { if (!_reloading) { _reloading = true; location.reload(); } }, 4000);
-    } else { location.reload(); }
-  };
-  async function checkVersion() {
-    try {
-      const res = await fetch(VERSION_URL + '?t=' + Date.now());
-      const data = await res.json();
-      const latest = data[TOOL_KEY];
-      if (latest && latest !== APP_VERSION) banner.style.display = 'block';
-    } catch(e) {}
-  }
-  window.addEventListener('load', checkVersion);
-})();
 </script>
 </body>
 </html>
