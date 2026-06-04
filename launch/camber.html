@@ -81,6 +81,7 @@
     <div id="controls">
         <button id="zeroBtn" class="zero">0°セット</button>
         <button id="truthBtn" class="warn">真値記録</button>
+        <button id="gravBtn" class="sec">重力軸確認</button>
         <button id="stillBtn" class="warn">静止3s</button>
         <button id="driftBtn" class="sec">ドリフト記録</button>
         <button id="clrBtn" class="sec">リセット</button>
@@ -131,9 +132,12 @@ function norm(v){ const m=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/m,v[1]/m,v
 // タグ法線（カメラ座標）= R の第3列
 function tagNormalCam(R){ return norm([R[0][2], R[1][2], R[2][2]]); }
 
-// デバイス座標 → カメラ座標：背面カメラはおおよそX軸まわり180°（x, -y, -z）
-// 残差＝カメラ-IMU取り付けずれ。0°セットで定数分は吸収、視点を振った時の残差で校正要否を判定。
+// デバイス座標 → カメラ座標
+// iPhoneの背面カメラ縦持ち: デバイスX=カメラX、デバイスY=-カメラY、デバイスZ=-カメラZ
+// ただし軸対応はデバッグモードで実測して確認する
 function gravToCamera(g){ return [g.x, -g.y, -g.z]; }
+// デバッグ用：生の重力値をログに出す
+function logGravRaw(){ if(gravity) addLog(`重力生値: x=${gravity.x.toFixed(3)} y=${gravity.y.toFixed(3)} z=${gravity.z.toFixed(3)}`); }
 
 // 生キャンバー = タグ法線の「上方向」への仰角（鉛直基準）
 // dot(法線, 上) は両方ワールド固定ベクトル → カメラ回転で不変（＝スマホを傾けても理論上動かない）
@@ -348,6 +352,7 @@ function addLog(msg){ const e=document.createElement('div'); e.className='entry'
 $('startBtn').onclick=async()=>{ await requestMotion(); init(); };
 $('zeroBtn').onclick=()=>setZero();
 $('truthBtn').onclick=()=>recordTruth();
+$('gravBtn').onclick=()=>logGravRaw();
 $('stillBtn').onclick=()=>startStill();
 $('driftBtn').onclick=()=>toggleDrift();
 $('clrBtn').onclick=()=>reset();
