@@ -6,6 +6,16 @@
     <title>SS Camber検証</title>
     <script>
     const _V = 'c0.2.1';
+    // SWキャッシュ回避：camber.htmlはSW管理外だがsw.jsがfetch横取りする場合に備えてno-cache指定
+    if(navigator.serviceWorker && navigator.serviceWorker.controller){
+        fetch(location.href, {cache:'no-store'}).then(r=>r.text()).then(html=>{
+            if(!html.includes(_V)) location.reload(true);
+        }).catch(()=>{});
+    }
+    document.addEventListener('DOMContentLoaded',()=>{
+        const el=document.getElementById('ver-display');
+        if(el) el.textContent=_V;
+    });
     </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -39,7 +49,7 @@
 
 <div id="start-screen">
     <h1>SS Camber検証</h1>
-    <p style="color:#555;">c0.1.0</p>
+    <p id="ver-display" style="color:#555;"></p>
     <p>単一タグ＋iPhone重力ベクトルで<br>
        <b>鉛直基準キャンバー</b>が出るかを検証する。<br>
        カメラを傾けても値が動かなければ重力補正成功。<br>
