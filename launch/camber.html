@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>SS Camber検証</title>
+    <script>
+    // SW非登録・常にネットワーク鮮度（検証用ツール）。キャッシュ対策の簡易リダイレクト。
+    const _V = 'c0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; height:100svh; overflow:hidden; }
+        #start-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:0 24px; text-align:center; }
+        #start-screen h1 { font-size:22px; }
+        #start-screen p { color:#888; font-size:13px; line-height:1.7; }
+        #main { position:absolute; inset:0; display:none; }
+        video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        canvas#overlay { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+        #panel { position:absolute; top:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:12px 14px; }
+        .row { display:flex; justify-content:space-between; align-items:center; padding:3px 0; font-size:13px; }
+        .lbl { color:#888; }
+        .val { font-weight:600; }
+        .big { font-size:26px; }
+        .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
+        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:150px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
+        .entry { border-bottom:1px solid #222; padding:2px 0; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        button.warn { background:#ff9500; }
+        button.zero { background:#34d058; }
+        #loading { position:absolute; inset:0; background:#111; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+        .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        input { width:60px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <h1>SS Camber検証</h1>
+    <p style="color:#555;">c0.1.0</p>
+    <p>単一タグ＋iPhone重力ベクトルで<br>
+       <b>鉛直基準キャンバー</b>が出るかを検証する。<br>
+       カメラを傾けても値が動かなければ重力補正成功。<br>
+       起動時に<b>モーションセンサーの許可</b>を求めます。</p>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <label style="color:#888;font-size:13px;">タグ黒部</label>
+        <input id="tagSizeInput" type="number" value="36" min="5" max="200">
+        <span style="color:#888;font-size:13px;">mm</span>
+    </div>
+    <button id="startBtn">カメラ＋センサー起動</button>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg" style="color:#888;">WASM読み込み中...</p></div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row"><span class="lbl">検出 / ID</span><span class="val" id="s-det">—</span></div>
+        <div class="row"><span class="lbl">タグ画素 / 距離</span><span class="val" id="s-px">—</span></div>
+        <div class="row"><span class="lbl">重力 |g| / センサー</span><span class="val" id="s-grav">—</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl">生キャンバー</span><span class="val" id="s-raw">—</span>
+        </div>
+        <div class="row"><span class="lbl">ゼロ済キャンバー</span><span class="val big" id="s-cam">—</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl" id="rec-lbl">振れ幅（記録OFF）</span><span class="val" id="s-spread">—</span>
+        </div>
+    </div>
+
+    <div id="controls">
+        <button id="zeroBtn" class="zero">0°セット</button>
+        <button id="stillBtn" class="warn">静止3s</button>
+        <button id="driftBtn" class="sec">ドリフト記録</button>
+        <button id="clrBtn" class="sec">リセット</button>
+    </div>
+
+    <div id="log-panel"></div>
+</div>
+
+<script src="./apriltag_wasm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d'), logEl = $('log-panel');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
+
+let detector = null;
+const MIN_TAG_PX = 40; // 検証は緩め（足切りで落とさない）
+
+// ===== IMU 重力 =====
+let gravity = null;       // デバイス座標の重力 {x,y,z}（accelerationIncludingGravity）
+let motionGranted = false;
+function onMotion(e){
+    const a = e.accelerationIncludingGravity;
+    if(a && a.x!=null) gravity = { x:a.x, y:a.y, z:a.z };
+}
+async function requestMotion(){
+    try{
+        if(typeof DeviceMotionEvent!=='undefined' && typeof DeviceMotionEvent.requestPermission==='function'){
+            const r = await DeviceMotionEvent.requestPermission();
+            motionGranted = (r==='granted');
+        }else{
+            motionGranted = true; // 非iOS/旧iOSは許可不要
+        }
+        if(motionGranted) window.addEventListener('devicemotion', onMotion);
+    }catch(e){ motionGranted=false; }
+}
+
+// ===== ベクトル・ポーズ系 =====
+function poseT(d){
+    if(!d.pose || !d.pose.t) return null;
+    const t=d.pose.t;
+    return Array.isArray(t[0]) ? [t[0][0],t[1][0],t[2][0]] : [t[0],t[1],t[2]];
+}
+function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+function distCm(t){ if(!t) return null; return Math.hypot(t[0],t[1],t[2])*100; }
+function norm(v){ const m=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/m,v[1]/m,v[2]/m]; }
+
+// タグ法線（カメラ座標）= R の第3列
+function tagNormalCam(R){ return norm([R[0][2], R[1][2], R[2][2]]); }
+
+// デバイス座標 → カメラ座標：背面カメラはおおよそX軸まわり180°（x, -y, -z）
+// 残差＝カメラ-IMU取り付けずれ。0°セットで定数分は吸収、視点を振った時の残差で校正要否を判定。
+function gravToCamera(g){ return [g.x, -g.y, -g.z]; }
+
+// 生キャンバー = タグ法線の「上方向」への仰角（鉛直基準）
+// dot(法線, 上) は両方ワールド固定ベクトル → カメラ回転で不変（＝スマホを傾けても理論上動かない）
+function rawCamberDeg(R, g){
+    const n = tagNormalCam(R);
+    const gc = norm(gravToCamera(g));
+    const up = [-gc[0], -gc[1], -gc[2]];
+    let d = n[0]*up[0] + n[1]*up[1] + n[2]*up[2];
+    d = Math.max(-1, Math.min(1, d));
+    return Math.asin(d) * 180/Math.PI;
+}
+
+// ===== ゼロ・統計 =====
+let zeroOffset = 0;       // 0°セットで登録する生キャンバーのオフセット
+let lastCam = null;       // 直近のゼロ済キャンバー
+
+// 静止再現性
+let still = null;         // { t0, samples:[] }
+// ドリフト記録
+let drift = null;         // { min, max }
+
+// ===== 初期化 =====
+async function init(){
+    $('start-screen').style.display='none';
+    $('loading').style.display='flex';
+    try{
+        const Module=await AprilTagWasm();
+        const _init=Module.cwrap('atagjs_init','number',[]);
+        const _setOpt=Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose=Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf=Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize=Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect=Module.cwrap('atagjs_detect','number',[]);
+        _init();
+        _setOpt(1.0,0.0,1,1,0,1,1);
+        detector={
+            set_camera_info:(fx,fy,cx,cy)=>_setPose(fx,fy,cx,cy),
+            set_tag_size:(id,sz)=>_setSize(id,sz),
+            detect:(g,w,h)=>{
+                const buf=_setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr=_detect(); const len=Module.getValue(ptr,'i32');
+                if(len===0) return [];
+                const sp=Module.getValue(ptr+4,'i32');
+                const view=new Uint8Array(Module.HEAP8.buffer,sp,len);
+                let j=''; for(let i=0;i<len;i++) j+=String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        $('loading-msg').textContent='カメラ起動中...';
+        await startCamera();
+    }catch(e){ $('loading-msg').textContent='エラー: '+e.message; console.error(e); }
+}
+
+async function startCamera(){
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    video.srcObject=stream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+    detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
+    const sz=(parseFloat($('tagSizeInput').value)||36)/1000;
+    for(let i=0;i<=43;i++) detector.set_tag_size(i,sz);
+    addLog(`起動 タグ黒部=${(sz*1000).toFixed(0)}mm センサー許可=${motionGranted?'OK':'NG'}`);
+    $('loading').style.display='none';
+    $('main').style.display='block';
+    requestAnimationFrame(loop);
+}
+
+function loop(){
+    try{ if(video.readyState>=2) process(); }catch(e){ console.warn(e); }
+    finally{ requestAnimationFrame(loop); }
+}
+
+function process(){
+    const W=video.videoWidth, H=video.videoHeight;
+    offscreen.width=W; offscreen.height=H;
+    offCtx.drawImage(video,0,0);
+    const img=offCtx.getImageData(0,0,W,H);
+    const gray=new Uint8Array(W*H);
+    for(let i=0;i<gray.length;i++) gray[i]=(img.data[i*4]*77+img.data[i*4+1]*151+img.data[i*4+2]*28)>>8;
+
+    let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+    ctx.clearRect(0,0,W,H);
+
+    // 一番大きいタグを主役（単一タグ検証）
+    let main=null, mainPx=0;
+    for(const d of dets){
+        if(!d.corners || !d.pose || !d.pose.R) continue;
+        const px=tagPx(d); drawTag(d);
+        if(px>=MIN_TAG_PX && px>mainPx){ mainPx=px; main=d; }
+    }
+
+    // 重力表示
+    if(gravity){
+        const gm=Math.hypot(gravity.x,gravity.y,gravity.z);
+        $('s-grav').textContent = `${gm.toFixed(2)} m/s² ✓`;
+        $('s-grav').className = 'val good';
+    }else{
+        $('s-grav').textContent = motionGranted? 'センサー待ち…' : '不許可';
+        $('s-grav').className = 'val bad';
+    }
+
+    if(main && gravity){
+        const t=poseT(main), d=distCm(t);
+        const raw = rawCamberDeg(main.pose.R, gravity);
+        const cam = raw - zeroOffset;
+        lastCam = cam;
+
+        $('s-det').textContent = `✅ ${main.id}`; $('s-det').className='val good';
+        $('s-px').textContent = `${mainPx.toFixed(0)}px / ${d!=null?d.toFixed(0)+'cm':'—'}`;
+        $('s-raw').textContent = raw.toFixed(2)+'°';
+        $('s-cam').textContent = cam.toFixed(2)+'°';
+
+        // 静止再現性
+        if(still){
+            still.samples.push(cam);
+            if(performance.now()-still.t0>=3000) finishStill();
+        }
+        // ドリフト記録
+        if(drift){
+            if(cam<drift.min) drift.min=cam;
+            if(cam>drift.max) drift.max=cam;
+            $('s-spread').textContent = `${(drift.max-drift.min).toFixed(2)}° (${drift.min.toFixed(2)}〜${drift.max.toFixed(2)})`;
+        }
+    }else{
+        $('s-det').textContent = main? '✅（重力待ち）' : '❌ 未検出';
+        $('s-det').className = 'val bad';
+        $('s-px').textContent='—'; $('s-raw').textContent='—'; $('s-cam').textContent='—';
+        lastCam=null;
+    }
+}
+
+function drawTag(d){
+    const c=d.corners;
+    ctx.strokeStyle='#34d058'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
+    for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
+    ctx.fillStyle='#34d058'; ctx.font='bold 18px -apple-system';
+    ctx.fillText(`#${d.id}`, c[0].x+4, c[0].y-6);
+}
+
+// ===== 統計 =====
+function mean(a){ return a.reduce((s,v)=>s+v,0)/a.length; }
+function sd(a){ if(a.length<2) return 0; const m=mean(a); return Math.sqrt(a.reduce((s,v)=>s+(v-m)*(v-m),0)/(a.length-1)); }
+
+function startStill(){
+    if(still) return;
+    if(lastCam==null){ addLog('静止測定: タグと重力が両方必要'); return; }
+    still={ t0:performance.now(), samples:[] };
+    $('stillBtn').textContent='静止測定中…'; $('stillBtn').style.background='#ff3b30';
+    addLog('★静止再現性: 3秒動かさないで');
+}
+function finishStill(){
+    const s=still; still=null;
+    $('stillBtn').textContent='静止3s'; $('stillBtn').style.background='';
+    if(s.samples.length<2){ addLog('静止測定: サンプル不足'); return; }
+    const m=mean(s.samples), sg=sd(s.samples);
+    addLog(`静止再現性: 平均${m.toFixed(2)}° σ=${sg.toFixed(3)}° (n=${s.samples.length}) ← IMU重力の精度床`);
+}
+
+function toggleDrift(){
+    if(drift){
+        const sp=(drift.max-drift.min).toFixed(2);
+        addLog(`ドリフト記録停止: 振れ幅 ${sp}° (${drift.min.toFixed(2)}〜${drift.max.toFixed(2)}) ← 視点バイアス＋校正残差`);
+        drift=null;
+        $('driftBtn').textContent='ドリフト記録'; $('driftBtn').style.background='';
+        $('rec-lbl').textContent='振れ幅（記録OFF）';
+    }else{
+        if(lastCam==null){ addLog('ドリフト記録: タグと重力が両方必要'); return; }
+        drift={ min:lastCam, max:lastCam };
+        $('driftBtn').textContent='記録停止'; $('driftBtn').style.background='#ff3b30';
+        $('rec-lbl').textContent='振れ幅（記録中）';
+        addLog('★ドリフト記録: 視点を色々変えて（近遠・左右・上下）');
+    }
+}
+
+function setZero(){
+    if(lastCam==null){ addLog('0°セット: タグと重力が両方必要'); return; }
+    zeroOffset += lastCam; // 現在のゼロ済値を0に合わせる
+    addLog(`0°セット完了（オフセット=${zeroOffset.toFixed(2)}°）← この後の値は全部この基準`);
+}
+
+function reset(){
+    zeroOffset=0; still=null; drift=null;
+    $('stillBtn').textContent='静止3s'; $('stillBtn').style.background='';
+    $('driftBtn').textContent='ドリフト記録'; $('driftBtn').style.background='';
+    $('rec-lbl').textContent='振れ幅（記録OFF）'; $('s-spread').textContent='—';
+    addLog('リセット（ゼロ点・記録クリア）');
+}
+
+function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
+
+$('startBtn').onclick=async()=>{ await requestMotion(); init(); };
+$('zeroBtn').onclick=()=>setZero();
+$('stillBtn').onclick=()=>startStill();
+$('driftBtn').onclick=()=>toggleDrift();
+$('clrBtn').onclick=()=>reset();
+</script>
+</body>
+</html>
