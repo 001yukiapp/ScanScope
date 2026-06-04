@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>SS Camber検証</title>
     <script>
-    const _V = 'c0.3.2';
+    const _V = 'c0.3.3';
     // SWキャッシュ回避：camber.htmlはSW管理外だがsw.jsがfetch横取りする場合に備えてno-cache指定
     if(navigator.serviceWorker && navigator.serviceWorker.controller){
         fetch(location.href, {cache:'no-store'}).then(r=>r.text()).then(html=>{
@@ -160,6 +160,12 @@ function rawCamberDeg(R, g){
     return Math.asin(d) * 180/Math.PI;
 }
 
+// ===== 中央値フィルタ（スパイクノイズ除去）=====
+const RAW_BUF_SIZE = 7;
+const rawBuf = [];
+function pushRaw(v){ rawBuf.push(v); if(rawBuf.length>RAW_BUF_SIZE) rawBuf.shift(); }
+function filteredRaw(){ if(!rawBuf.length) return null; const s=[...rawBuf].sort((a,b)=>a-b); const n=s.length; return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2; }
+
 // ===== ゼロ・統計 =====
 let zeroOffset = 0;       // 0°セットで登録する生キャンバーのオフセット
 let lastCam = null;       // 直近のゼロ済キャンバー
@@ -251,7 +257,9 @@ function process(){
 
     if(main && gravity){
         const t=poseT(main), d=distCm(t);
-        const raw = rawCamberDeg(main.pose.R, gravity);
+        const rawInstant = rawCamberDeg(main.pose.R, gravity);
+        pushRaw(rawInstant);
+        const raw = filteredRaw();
         const cam = raw - zeroOffset;
         lastCam = cam;
 
@@ -349,7 +357,7 @@ function recordTruth(){
 }
 
 function reset(){
-    zeroOffset=0; still=null; drift=null;
+    zeroOffset=0; still=null; drift=null; rawBuf.length=0;
     $('stillBtn').textContent='静止3s'; $('stillBtn').style.background='';
     $('driftBtn').textContent='ドリフト記録'; $('driftBtn').style.background='';
     $('rec-lbl').textContent='振れ幅（記録OFF）'; $('s-spread').textContent='—';
