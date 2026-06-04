@@ -6,7 +6,7 @@
     <title>SS Camber検証</title>
     <script>
     // SW非登録・常にネットワーク鮮度（検証用ツール）。キャッシュ対策の簡易リダイレクト。
-    const _V = 'c0.1.0';
+    const _V = 'c0.2.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -69,12 +69,18 @@
         </div>
         <div class="row"><span class="lbl">ゼロ済キャンバー</span><span class="val big" id="s-cam">—</span></div>
         <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
+            <span class="lbl">真値（既知角）</span>
+            <span><input id="truthInput" type="number" value="0" step="0.1">°</span>
+        </div>
+        <div class="row"><span class="lbl">誤差（報告−真値）</span><span class="val" id="s-err">—</span></div>
+        <div class="row" style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
             <span class="lbl" id="rec-lbl">振れ幅（記録OFF）</span><span class="val" id="s-spread">—</span>
         </div>
     </div>
 
     <div id="controls">
         <button id="zeroBtn" class="zero">0°セット</button>
+        <button id="truthBtn" class="warn">真値記録</button>
         <button id="stillBtn" class="warn">静止3s</button>
         <button id="driftBtn" class="sec">ドリフト記録</button>
         <button id="clrBtn" class="sec">リセット</button>
@@ -240,6 +246,16 @@ function process(){
         $('s-raw').textContent = raw.toFixed(2)+'°';
         $('s-cam').textContent = cam.toFixed(2)+'°';
 
+        // 真値との誤差（スケール・直線性チェック）
+        const truth = parseFloat($('truthInput').value);
+        if(!isNaN(truth)){
+            const err = cam - truth;
+            $('s-err').textContent = (err>=0?'+':'')+err.toFixed(2)+'°';
+            $('s-err').className = 'val ' + (Math.abs(err)<0.25?'good':(Math.abs(err)<1?'mid':'bad'));
+        }else{
+            $('s-err').textContent='—'; $('s-err').className='val';
+        }
+
         // 静止再現性
         if(still){
             still.samples.push(cam);
@@ -255,6 +271,7 @@ function process(){
         $('s-det').textContent = main? '✅（重力待ち）' : '❌ 未検出';
         $('s-det').className = 'val bad';
         $('s-px').textContent='—'; $('s-raw').textContent='—'; $('s-cam').textContent='—';
+        $('s-err').textContent='—'; $('s-err').className='val';
         lastCam=null;
     }
 }
@@ -308,11 +325,21 @@ function setZero(){
     addLog(`0°セット完了（オフセット=${zeroOffset.toFixed(2)}°）← この後の値は全部この基準`);
 }
 
+// 真値記録：既知角に対する報告値・誤差をログ（0°/5°/10°の3点でスケール＆直線性を見る）
+function recordTruth(){
+    if(lastCam==null){ addLog('真値記録: タグと重力が両方必要'); return; }
+    const truth = parseFloat($('truthInput').value);
+    if(isNaN(truth)){ addLog('真値記録: 真値を入力して'); return; }
+    const err = lastCam - truth;
+    addLog(`真値記録: 真値${truth.toFixed(2)}° 報告${lastCam.toFixed(2)}° 誤差${(err>=0?'+':'')+err.toFixed(2)}° ← 安定かつ正しいか`);
+}
+
 function reset(){
     zeroOffset=0; still=null; drift=null;
     $('stillBtn').textContent='静止3s'; $('stillBtn').style.background='';
     $('driftBtn').textContent='ドリフト記録'; $('driftBtn').style.background='';
     $('rec-lbl').textContent='振れ幅（記録OFF）'; $('s-spread').textContent='—';
+    $('s-err').textContent='—'; $('s-err').className='val';
     addLog('リセット（ゼロ点・記録クリア）');
 }
 
@@ -320,6 +347,7 @@ function addLog(msg){ const e=document.createElement('div'); e.className='entry'
 
 $('startBtn').onclick=async()=>{ await requestMotion(); init(); };
 $('zeroBtn').onclick=()=>setZero();
+$('truthBtn').onclick=()=>recordTruth();
 $('stillBtn').onclick=()=>startStill();
 $('driftBtn').onclick=()=>toggleDrift();
 $('clrBtn').onclick=()=>reset();
