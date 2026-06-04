@@ -8,7 +8,7 @@
     <meta name="theme-color" content="#111111">
     <link rel="apple-touch-icon" href="./icon.svg">
     <script>
-    const APP_VERSION = 'd0.2.0';
+    const APP_VERSION = 'd0.2.1';
     const TOOL_KEY = 'dodeca';
     const VERSION_URL = 'https://001yukiapp.github.io/ScanScope/launch/version.json';
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
@@ -47,7 +47,7 @@
     <h1>ScanScope 正十二面体モード</h1>
     <p style="color:#555;">d0.2.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
+       前ターゲット = ID 1〜11<br>後ターゲット = ID 12〜22（暫定）<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
        ③ 調整後に測定 → Δが変化量</p>
@@ -110,7 +110,7 @@ let detector = null;
 let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 
 // ===== グループ分け（どのIDがどちらのホイールか）=====
-const ID_SPLIT = 11;                 // id < 11 → A、それ以上 → B
+const ID_SPLIT = 12;                 // id < 12 → A（ID 1〜11）、それ以上 → B
 function groupOf(id) { return id < ID_SPLIT ? 'A' : 'B'; }
 
 // ===== 剛体モデル（自己キャリブレーションで学習）=====
