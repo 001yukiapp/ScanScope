@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.0';
+    const _V = 'd0.10.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,7 +41,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.9.0</p>
+    <p style="color:#555;">d0.10.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -345,7 +345,7 @@ function finishCalibrate(){
             inTree.add(to);
             if(best.frac<0.7) weak++;
         }
-        // グローバル回転平均：各面を全隣接辺の合意へ寄せる（弱辺の連鎖誤差を分散）
+        // ロバスト回転平均：現在のQと整合する辺だけで精製（反転した異常辺を棄却）
         for(let it=0; it<15; it++){
             for(const n of nodes){
                 if(n===root || !Q[n]) continue;
@@ -353,20 +353,24 @@ function finishCalibrate(){
                 for(const e of (adj[n]||[])){
                     const other=(e.i===n)?e.j:e.i; if(!Q[other]) continue;
                     const Rrel=(other<n)?quatToMat(e.q):matT(quatToMat(e.q));  // Rrel(other,n)
-                    ests.push(matToQuat(matMul(Q[other],Rrel)));
+                    const cand=matMul(Q[other],Rrel);
+                    if(angBetween(cand, Q[n])>20) continue;   // 反転/異常辺は無視
+                    ests.push(matToQuat(cand));
                 }
                 Q[n]=quatToMat(quatAvg(ests));
             }
         }
         model[g].ref=root; model[g].Q=Q;
-        // 整合度：学習Qが観測した全ペア相対回転をどれだけ満たすか（小さいほど良い）
-        let qres=0, qn=0;
+        // 整合度：学習Qが観測相対回転を満たす度合い。中央値＝大半の辺の質、良辺%＝信頼辺の割合。
+        const fits=[];
         for(const k in edges){ const e=edges[k]; if(!Q[e.i]||!Q[e.j]) continue;
             const pred=matMul(matT(Q[e.i]),Q[e.j]);      // Q_i^T·Q_j = Mi^T·Mj
-            qres+=angBetween(pred, quatToMat(e.q)); qn++;
+            fits.push(angBetween(pred, quatToMat(e.q)));
         }
-        const fit=qn?(qres/qn):0;
-        msg.push(`${g}:基準#${root} ${inTree.size}/${nodes.size}面 弱辺${weak} 整合${fit.toFixed(1)}°`);
+        fits.sort((a,b)=>a-b);
+        const medFit=fits.length?fits[Math.floor(fits.length/2)]:0;
+        const goodPct=fits.length?Math.round(fits.filter(x=>x<15).length/fits.length*100):0;
+        msg.push(`${g}:基準#${root} ${inTree.size}/${nodes.size}面 良辺${goodPct}% 整合中央${medFit.toFixed(1)}°`);
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')}`);
