@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ScanScope 4輪アライメント</title>
+    <script>
+    const _V = 'a0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; height:100svh; overflow:hidden; }
+        #start-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:0 24px; text-align:center; overflow-y:auto; }
+        #start-screen h1 { font-size:20px; }
+        #start-screen p { color:#888; font-size:13px; line-height:1.7; }
+        .badge { background:#1c1c1e; border-radius:10px; padding:10px 14px; font-size:12px; color:#aaa; line-height:1.6; text-align:left; width:100%; max-width:380px; }
+        .badge b { color:#fff; }
+        #main { position:absolute; inset:0; display:none; }
+        video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        canvas#overlay { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+        #panel { position:absolute; top:10px; left:10px; right:10px; background:rgba(0,0,0,0.82); backdrop-filter:blur(10px); border-radius:14px; padding:10px 12px; }
+        .row { display:flex; justify-content:space-between; padding:2px 0; font-size:12px; }
+        .lbl { color:#888; }
+        .val { font-weight:600; }
+        .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
+        #wheel-btns { position:absolute; top:170px; left:10px; right:10px; display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:6px; }
+        .wbtn { background:rgba(60,60,60,0.9); border:none; border-radius:10px; padding:10px 0; font-size:13px; font-weight:600; color:#888; display:flex; flex-direction:column; align-items:center; gap:3px; }
+        .wbtn.selected { background:#007aff; color:#fff; }
+        .wbtn.done { background:rgba(52,208,88,0.25); color:#34d058; border:1px solid #34d058; }
+        .wbtn.done.selected { background:#34d058; color:#000; }
+        .wbtn .wlbl { font-size:16px; font-weight:700; }
+        .wbtn .wval { font-size:10px; }
+        #measure-panel { position:absolute; top:250px; left:10px; right:10px; background:rgba(0,0,0,0.82); backdrop-filter:blur(10px); border-radius:14px; padding:10px 12px; }
+        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:152px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
+        #results-panel { position:absolute; inset:0; background:rgba(0,0,0,0.95); backdrop-filter:blur(20px); display:none; flex-direction:column; padding:20px; overflow-y:auto; gap:10px; }
+        #results-panel h2 { font-size:18px; text-align:center; }
+        .res-card { background:#1c1c1e; border-radius:12px; padding:12px 14px; }
+        .res-title { font-size:11px; color:#888; margin-bottom:6px; }
+        .res-row { display:flex; justify-content:space-between; font-size:14px; padding:3px 0; border-bottom:1px solid #2c2c2e; }
+        .res-row:last-child { border:none; }
+        .res-big { font-size:28px; font-weight:700; text-align:center; padding:8px 0; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        button.warn { background:#ff9500; }
+        button.green { background:#34d058; color:#000; }
+        #loading { position:absolute; inset:0; background:#111; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+        .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        input[type=number] { width:54px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+        .entry { border-bottom:1px solid #222; padding:2px 0; }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <h1>ScanScope 4輪アライメント</h1>
+    <p style="color:#555;">a0.1.0</p>
+    <div class="badge">
+        <b>使い方</b><br>
+        ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
+        ② カメラを固定（三脚・車体にもたせかけ等）<br>
+        ③ 各輪にドデカを付けて順番に測定<br>
+        ④ 4輪そろったら結果を見る
+    </div>
+    <div class="badge">
+        <b>床タグモード（オプション）</b><br>
+        ID 44〜47 のタグをカメラに見せると世界座標で測定します（精度向上）。<br>
+        floor_sheet.html をPCに表示して床に置いてください。
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <label style="color:#888;font-size:13px;">タグサイズ</label>
+        <input id="tagSizeInput" type="number" value="36" min="5" max="200">
+        <span style="color:#888;font-size:13px;">mm（ドデカのタグ）</span>
+    </div>
+    <button id="startBtn">カメラ起動</button>
+    <p style="font-size:11px;color:#444;">事前にdodeca.htmlでキャリブしてください。<br>モデルは自動で読み込みます。</p>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg" style="color:#888;">WASM読み込み中...</p></div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row"><span class="lbl">モード</span><span class="val" id="s-mode">-</span></div>
+        <div class="row"><span class="lbl">カメラ固定状態</span><span class="val" id="s-anchor">未固定</span></div>
+        <div class="row"><span class="lbl">床タグ検出</span><span class="val" id="s-floor">-</span></div>
+        <div class="row"><span class="lbl">ホイールタグ検出</span><span class="val" id="s-wheel">-</span></div>
+    </div>
+
+    <!-- 4輪選択ボタン -->
+    <div id="wheel-btns">
+        <button class="wbtn selected" id="wbtn-FL" onclick="selectWheel('FL')">
+            <span class="wlbl">FL</span><span class="wval" id="wval-FL">未測定</span>
+        </button>
+        <button class="wbtn" id="wbtn-FR" onclick="selectWheel('FR')">
+            <span class="wlbl">FR</span><span class="wval" id="wval-FR">未測定</span>
+        </button>
+        <button class="wbtn" id="wbtn-RL" onclick="selectWheel('RL')">
+            <span class="wlbl">RL</span><span class="wval" id="wval-RL">未測定</span>
+        </button>
+        <button class="wbtn" id="wbtn-RR" onclick="selectWheel('RR')">
+            <span class="wlbl">RR</span><span class="wval" id="wval-RR">未測定</span>
+        </button>
+    </div>
+
+    <!-- 現在の測定値 -->
+    <div id="measure-panel">
+        <div class="row"><span class="lbl">Horn残差</span><span class="val" id="s-resid">-</span></div>
+        <div class="row"><span class="lbl">検出面数</span><span class="val" id="s-faces">-</span></div>
+        <div class="row"><span class="lbl">ヨー（トー代理）</span><span class="val" id="s-yaw" style="font-size:18px;">-</span></div>
+        <div class="row"><span class="lbl">キャンバー（IMU）</span><span class="val" id="s-camber">-</span></div>
+        <div class="row"><span class="lbl">カメラ高さ</span><span class="val" id="s-camH">-</span></div>
+    </div>
+
+    <div id="controls">
+        <button id="anchorBtn" class="warn" onclick="toggleAnchor()">カメラ固定</button>
+        <button id="recordBtn" onclick="recordWheel()">この輪を記録</button>
+        <button onclick="showResults()" class="sec">結果を見る</button>
+        <button onclick="clearAll()" class="sec">全消去</button>
+    </div>
+
+    <div id="log-panel"></div>
+</div>
+
+<!-- 結果画面 -->
+<div id="results-panel">
+    <h2>4輪アライメント 結果</h2>
+    <div id="results-content"></div>
+    <button onclick="hideResults()" class="sec" style="margin-top:8px;">戻る</button>
+    <button id="copyResultBtn" class="green" style="margin-top:4px;">結果をコピー</button>
+</div>
+
+<script src="./wm_geom.js"></script>
+<script src="./apriltag_wasm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
+const logEl = $('log-panel');
+
+let detector = null;
+let frameCount = 0, fps = 0, lastFpsTime = performance.now();
+
+// ===== 床タグ世界座標（メートル）=====
+const FLOOR_WORLD = { 44:[0,0,0], 45:[0.2,0,0], 46:[0,0,0.2], 47:[0.2,0,0.2] };
+const FLOOR_IDS = [44, 45, 46, 47];
+const FLOOR_TAG_SIZE = 0.15; // 150mm
+const MIN_FLOOR_PX = 40;
+const MIN_WHEEL_PX = 60;
+
+// ===== ホイールタグID =====
+const WHEEL_IDS_MIN = 1, WHEEL_IDS_MAX = 11;
+
+// ===== ドデカ本体モデル（dodeca.htmlのlocalStorageから読み込み）=====
+let bodyModel = null; // {id_str: [x,y,z]}
+{
+    try {
+        const s = localStorage.getItem('scanscope_dodeca_model');
+        if (s) {
+            const m = JSON.parse(s);
+            const P = m.A?.P || m.B?.P || null;
+            if (P && Object.keys(P).length >= 3) {
+                bodyModel = P;
+            }
+        }
+    } catch(e) {}
+}
+
+// ===== 4輪データ =====
+const WHEELS = ['FL','FR','RL','RR'];
+let wheelData = { FL:null, FR:null, RL:null, RR:null };
+let selectedWheel = 'FL';
+
+// ===== カメラ固定（アンカー）=====
+let anchorOrientation = null; // {beta, gamma}
+let currentOrientation = null;
+window.addEventListener('deviceorientation', e => {
+    currentOrientation = { alpha: e.alpha||0, beta: e.beta||0, gamma: e.gamma||0 };
+});
+
+// ===== IMUキャンバー =====
+let gravityVec = null; // カメラ座標系での重力ベクトル（正規化済み）
+window.addEventListener('devicemotion', e => {
+    const a = e.accelerationIncludingGravity;
+    if (!a) return;
+    const mag = Math.hypot(a.x, a.y, a.z);
+    if (mag < 0.1) return;
+    gravityVec = [-a.x/mag, -a.y/mag, -a.z/mag]; // 背面カメラ軸補正
+});
+
+// ===== 現在フレームの測定結果 =====
+let currentMeasure = null; // { R, yaw, camber, residual, faces, cameraPose }
+
+// ===== 行列ユーティリティ =====
+function matT(R){ return [[R[0][0],R[1][0],R[2][0]],[R[0][1],R[1][1],R[2][1]],[R[0][2],R[1][2],R[2][2]]]; }
+function matMul(A,B){
+    const C=[[0,0,0],[0,0,0],[0,0,0]];
+    for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=A[i][k]*B[k][j];C[i][j]=s;}
+    return C;
+}
+function matVec(R,v){ return [R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2], R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2], R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]]; }
+function centroid3(pts){ const c=[0,0,0]; for(const p of pts){c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];} return [c[0]/pts.length,c[1]/pts.length,c[2]/pts.length]; }
+
+// ===== カメラ自己位置推定（床タグから）=====
+function localizeCamera(visibleFloor) {
+    if (visibleFloor.length < 2) return null;
+    const P = visibleFloor.map(f => FLOOR_WORLD[f.id]);
+    const C = visibleFloor.map(f => f.t);
+    if (P.some(p => !p)) return null;
+    const sol = WMGeom.hornPose(P, C);
+    // カメラのY世界座標を確認（床より上にあるはず）
+    const pbar = centroid3(P);
+    const cbar = centroid3(C);
+    const Rt = matT(sol.R);
+    const RtCbar = matVec(Rt, cbar);
+    const camY = pbar[1] - RtCbar[1];
+    if (camY < 0) {
+        // 鏡像解: Z列符号を反転した回転で再試行
+        const Cmirror = C.map(c => [c[0], c[1], -c[2]]);
+        const sol2 = WMGeom.hornPose(P, Cmirror);
+        const R2 = sol2.R;
+        const R_fixed = [
+            [ R2[0][0],  R2[0][1], -R2[0][2]],
+            [ R2[1][0],  R2[1][1], -R2[1][2]],
+            [-R2[2][0], -R2[2][1],  R2[2][2]]
+        ];
+        const Rt2 = matT(R_fixed);
+        const RtC2 = matVec(Rt2, cbar);
+        const camY2 = pbar[1] - RtC2[1];
+        return { R_world_to_cam: R_fixed, camH: camY2, rms: sol2.rms };
+    }
+    return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms };
+}
+
+// ===== ホイール姿勢推定 =====
+function estimateWheelPose(wheelDets, cameraPose) {
+    if (!bodyModel) return null;
+    const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
+    if (valid.length < 3) return null;
+    const P = valid.map(d => bodyModel[String(d.id)]);
+    const C = valid.map(d => d.pose.t);
+    const sol = WMGeom.hornPose(P, C);
+    let R = sol.R;
+    let mode = 'camera';
+    if (cameraPose) {
+        R = matMul(matT(cameraPose.R_world_to_cam), sol.R);
+        mode = 'world';
+    }
+    return { R, mode, residual: sol.rms * 1000, faces: valid.length };
+}
+
+// ===== ヨー角（水平方向の向き）=====
+// R の Z列（本体Z軸）をカメラ/ワールドXZ平面に投影してatan2
+function extractYaw(R) {
+    const nx = R[0][2], nz = R[2][2];
+    return Math.atan2(nx, nz) * 180 / Math.PI;
+}
+
+// ===== キャンバー（IMU重力からロール推定）=====
+// R = 本体→カメラ回転
+// 重力ベクトルをカメラ系→本体系に変換して傾きを算出
+function extractCamber() {
+    if (!gravityVec) return null;
+    // g_cam = gravityVec（カメラ系の重力方向）
+    // キャンバー ≈ 重力ベクトルのX成分のarcsinをそのまま使う（camber.html準拠）
+    const gx = gravityVec[0];
+    return Math.asin(Math.max(-1, Math.min(1, gx))) * 180 / Math.PI;
+}
+
+// ===== カメラ固定状態チェック =====
+function anchorDrift() {
+    if (!anchorOrientation || !currentOrientation) return null;
+    const db = Math.abs(currentOrientation.beta - anchorOrientation.beta);
+    const dg = Math.abs(currentOrientation.gamma - anchorOrientation.gamma);
+    return Math.hypot(db, dg);
+}
+
+// ===== タグ品質 =====
+function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+
+// ===== ログ =====
+function addLog(msg) {
+    const e = document.createElement('div');
+    e.className = 'entry';
+    e.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.prepend(e);
+}
+
+// ===== UI更新 =====
+function updatePanel(cameraPose, wheelEst) {
+    // モード
+    const hasModel = bodyModel && Object.keys(bodyModel).length >= 3;
+    let modeStr = hasModel ? '測定可' : '<span class="bad">モデルなし</span>';
+    $('s-mode').innerHTML = modeStr + ` FPS${fps}`;
+
+    // カメラ固定
+    if (anchorOrientation) {
+        const drift = anchorDrift();
+        const cls = drift < 3 ? 'good' : drift < 8 ? 'mid' : 'bad';
+        $('s-anchor').innerHTML = `<span class="${cls}">固定中 ずれ${drift.toFixed(1)}°</span>`;
+    } else {
+        $('s-anchor').innerHTML = '<span class="mid">未固定（精度低下の可能性）</span>';
+    }
+
+    // 床タグ
+    if (cameraPose) {
+        $('s-floor').innerHTML = `<span class="good">検出 残差${cameraPose.rms.toFixed(1)}mm H=${(cameraPose.camH*100).toFixed(0)}cm</span>`;
+        $('s-camH').textContent = `${(cameraPose.camH * 100).toFixed(1)} cm`;
+    } else {
+        $('s-floor').innerHTML = '<span class="mid">なし（固定カメラモード）</span>';
+        $('s-camH').textContent = '-';
+    }
+
+    // ホイール
+    if (wheelEst) {
+        $('s-wheel').innerHTML = `<span class="good">${wheelEst.faces}面 残差${wheelEst.residual.toFixed(1)}mm</span>`;
+        $('s-resid').textContent = `${wheelEst.residual.toFixed(1)} mm`;
+        $('s-faces').textContent = `${wheelEst.faces} 面 (${wheelEst.mode})`;
+        const yaw = extractYaw(wheelEst.R);
+        $('s-yaw').textContent = `${yaw >= 0 ? '+' : ''}${yaw.toFixed(2)}°`;
+        const cls = Math.abs(yaw) < 1 ? 'good' : Math.abs(yaw) < 3 ? 'mid' : 'bad';
+        $('s-yaw').className = `val ${cls}`;
+    } else {
+        $('s-wheel').innerHTML = '<span class="mid">未検出</span>';
+        $('s-resid').textContent = '-';
+        $('s-faces').textContent = '-';
+        $('s-yaw').textContent = '-';
+        $('s-yaw').className = 'val';
+    }
+
+    // キャンバー（IMU）
+    const camber = extractCamber();
+    if (camber !== null) {
+        $('s-camber').textContent = `${camber >= 0 ? '+' : ''}${camber.toFixed(2)}°`;
+    } else {
+        $('s-camber').textContent = 'IMU待機中';
+    }
+}
+
+// ===== 描画 =====
+function drawTag(d, color='#00ff00') {
+    const c = d.corners;
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(c[0].x, c[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px monospace';
+    ctx.fillText(`#${d.id}`, c[0].x + 4, c[0].y + 14);
+}
+
+// ===== 初期化 =====
+async function init() {
+    $('start-screen').style.display = 'none';
+    $('loading').style.display = 'flex';
+    try {
+        const Module = await AprilTagWasm();
+        const _init = Module.cwrap('atagjs_init','number',[]);
+        const _setOpt = Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose = Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf = Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize = Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect = Module.cwrap('atagjs_detect','number',[]);
+        _init();
+        _setOpt(1.0, 0.0, 1, 1, 0, 1, 1);
+        detector = {
+            set_camera_info: (fx,fy,cx,cy) => _setPose(fx,fy,cx,cy),
+            set_tag_size: (id,sz) => _setSize(id,sz),
+            detect: (g,w,h) => {
+                const buf = _setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr = _detect(); const len = Module.getValue(ptr,'i32');
+                if (len === 0) return [];
+                const sp = Module.getValue(ptr+4,'i32');
+                const view = new Uint8Array(Module.HEAP8.buffer, sp, len);
+                let j = ''; for (let i = 0; i < len; i++) j += String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        $('loading-msg').textContent = 'カメラ起動中...';
+        await startCamera();
+        if (!bodyModel) addLog('⚠ dodeca.htmlでキャリブ済みモデルが見つかりません。先にdodeca.htmlでキャリブしてください。');
+        else addLog(`✅ ドデカモデル読み込み: ${Object.keys(bodyModel).length}面`);
+    } catch(e) {
+        $('loading-msg').textContent = 'エラー: ' + e.message;
+        console.error(e);
+    }
+}
+
+async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} }, audio:false });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+    detector.set_camera_info(1243, 1243, video.videoWidth/2, video.videoHeight/2);
+    const sz = (parseFloat($('tagSizeInput').value) || 36) / 1000;
+    for (let i = WHEEL_IDS_MIN; i <= WHEEL_IDS_MAX; i++) detector.set_tag_size(i, sz);
+    for (const id of FLOOR_IDS) detector.set_tag_size(id, FLOOR_TAG_SIZE);
+    $('loading').style.display = 'none';
+    $('main').style.display = 'block';
+    requestAnimationFrame(loop);
+}
+
+// ===== メインループ =====
+function loop() {
+    try {
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) { fps = frameCount; frameCount = 0; lastFpsTime = now; }
+        if (video.readyState >= 2) process();
+    } catch(e) { console.warn(e); }
+    finally { requestAnimationFrame(loop); }
+}
+
+function process() {
+    const W = video.videoWidth, H = video.videoHeight;
+    offscreen.width = W; offscreen.height = H;
+    offCtx.drawImage(video, 0, 0);
+    const img = offCtx.getImageData(0, 0, W, H);
+    const gray = new Uint8Array(W * H);
+    for (let i = 0; i < gray.length; i++) gray[i] = (img.data[i*4]*77 + img.data[i*4+1]*151 + img.data[i*4+2]*28) >> 8;
+
+    let dets = []; try { dets = detector.detect(gray, W, H) || []; } catch(e) {}
+
+    ctx.clearRect(0, 0, W, H);
+
+    const floorDets = dets.filter(d => d.pose && FLOOR_IDS.includes(d.id) && tagPx(d) >= MIN_FLOOR_PX);
+    const wheelDets = dets.filter(d => d.pose && d.id >= WHEEL_IDS_MIN && d.id <= WHEEL_IDS_MAX && tagPx(d) >= MIN_WHEEL_PX);
+
+    floorDets.forEach(d => drawTag(d, '#ffd700'));
+    wheelDets.forEach(d => drawTag(d, '#00ff00'));
+
+    // カメラ自己位置（床タグから）
+    let cameraPose = null;
+    if (floorDets.length >= 2) {
+        const visible = floorDets.map(d => ({ id: d.id, t: d.pose.t }));
+        cameraPose = localizeCamera(visible);
+    }
+
+    // ホイール姿勢
+    const wheelEst = estimateWheelPose(wheelDets, cameraPose);
+
+    currentMeasure = wheelEst ? { ...wheelEst, yaw: extractYaw(wheelEst.R), camber: extractCamber(), cameraPose } : null;
+
+    updatePanel(cameraPose, wheelEst);
+}
+
+// ===== 輪選択 =====
+function selectWheel(w) {
+    selectedWheel = w;
+    for (const ww of WHEELS) {
+        const btn = $(`wbtn-${ww}`);
+        btn.classList.toggle('selected', ww === w);
+    }
+}
+
+// ===== 記録 =====
+function recordWheel() {
+    if (!currentMeasure) {
+        addLog('❌ ターゲット未検出。ドデカを映してから記録してください。');
+        return;
+    }
+    if (!anchorOrientation && !currentMeasure.cameraPose) {
+        addLog('⚠ カメラ未固定・床タグなし。精度が低下します（記録は続行）。');
+    }
+    if (currentMeasure.residual > 5) {
+        addLog(`⚠ Horn残差 ${currentMeasure.residual.toFixed(1)}mm — 大きめ。ターゲットを近づけるか光量改善を。`);
+    }
+    wheelData[selectedWheel] = {
+        R: currentMeasure.R,
+        yaw: currentMeasure.yaw,
+        camber: currentMeasure.camber,
+        residual: currentMeasure.residual,
+        faces: currentMeasure.faces,
+        mode: currentMeasure.mode,
+        camberImu: currentMeasure.camber,
+    };
+    // ボタン更新
+    const btn = $(`wbtn-${selectedWheel}`);
+    btn.classList.add('done');
+    $(`wval-${selectedWheel}`).textContent = `${currentMeasure.yaw >= 0 ? '+' : ''}${currentMeasure.yaw.toFixed(1)}°`;
+    addLog(`✅ ${selectedWheel} 記録: ヨー${currentMeasure.yaw.toFixed(2)}° キャンバー${currentMeasure.camber != null ? currentMeasure.camber.toFixed(2)+'°' : '-'} ${currentMeasure.faces}面 残差${currentMeasure.residual.toFixed(1)}mm (${currentMeasure.mode})`);
+    // 次の輪へ自動移動
+    const idx = WHEELS.indexOf(selectedWheel);
+    if (idx < WHEELS.length - 1) selectWheel(WHEELS[idx + 1]);
+}
+
+// ===== アンカー =====
+function toggleAnchor() {
+    if (anchorOrientation) {
+        anchorOrientation = null;
+        $('anchorBtn').textContent = 'カメラ固定';
+        $('anchorBtn').className = 'warn';
+        addLog('カメラ固定解除');
+    } else {
+        anchorOrientation = currentOrientation ? { ...currentOrientation } : { beta:0, gamma:0 };
+        $('anchorBtn').textContent = '固定解除';
+        $('anchorBtn').className = 'green';
+        addLog('カメラ固定。測定中はカメラを動かさないでください。');
+    }
+}
+
+// ===== 全消去 =====
+function clearAll() {
+    for (const w of WHEELS) {
+        wheelData[w] = null;
+        $(`wbtn-${w}`).classList.remove('done');
+        $(`wval-${w}`).textContent = '未測定';
+    }
+    addLog('全消去');
+}
+
+// ===== 結果表示 =====
+function showResults() {
+    const recorded = WHEELS.filter(w => wheelData[w]);
+    if (recorded.length === 0) { addLog('まだ1輪も記録されていません。'); return; }
+
+    let html = '';
+
+    // 各輪の詳細
+    html += '<div class="res-card"><div class="res-title">各輪の測定値</div>';
+    for (const w of WHEELS) {
+        const d = wheelData[w];
+        if (!d) {
+            html += `<div class="res-row"><span>${w}</span><span style="color:#555">未測定</span></div>`;
+        } else {
+            const yawCls = Math.abs(d.yaw) < 1 ? '#34d058' : Math.abs(d.yaw) < 3 ? '#ffd700' : '#ff6b6b';
+            html += `<div class="res-row"><span>${w} <small style="color:#555">${d.faces}面 ${d.residual.toFixed(1)}mm</small></span>`;
+            html += `<span>ヨー<b style="color:${yawCls}"> ${d.yaw >= 0 ? '+' : ''}${d.yaw.toFixed(2)}°</b>`;
+            if (d.camberImu != null) html += ` キャン<b> ${d.camberImu >= 0 ? '+' : ''}${d.camberImu.toFixed(1)}°</b>`;
+            html += '</span></div>';
+        }
+    }
+    html += '</div>';
+
+    // トー差（前後比較）
+    if (wheelData.FL && wheelData.RL) {
+        const toeLeft = wheelData.FL.yaw - wheelData.RL.yaw;
+        const cls = Math.abs(toeLeft) < 0.5 ? '#34d058' : Math.abs(toeLeft) < 1.5 ? '#ffd700' : '#ff6b6b';
+        html += `<div class="res-card"><div class="res-title">左側 トー差（FL − RL）</div>`;
+        html += `<div class="res-big" style="color:${cls}">${toeLeft >= 0 ? '+' : ''}${toeLeft.toFixed(2)}°</div>`;
+        html += `<div style="font-size:11px;color:#888;text-align:center">0°が理想。+は前輪トーアウト傾向</div></div>`;
+    }
+    if (wheelData.FR && wheelData.RR) {
+        const toeRight = wheelData.FR.yaw - wheelData.RR.yaw;
+        const cls = Math.abs(toeRight) < 0.5 ? '#34d058' : Math.abs(toeRight) < 1.5 ? '#ffd700' : '#ff6b6b';
+        html += `<div class="res-card"><div class="res-title">右側 トー差（FR − RR）</div>`;
+        html += `<div class="res-big" style="color:${cls}">${toeRight >= 0 ? '+' : ''}${toeRight.toFixed(2)}°</div>`;
+        html += `<div style="font-size:11px;color:#888;text-align:center">0°が理想。+は前輪トーアウト傾向</div></div>`;
+    }
+    // 左右非対称
+    if (wheelData.FL && wheelData.FR) {
+        const frontAsym = wheelData.FL.yaw + wheelData.FR.yaw;
+        html += `<div class="res-card"><div class="res-title">前軸 左右対称チェック（FL + FR）</div>`;
+        html += `<div style="font-size:11px;color:#888;">0°が左右対称。|値|が大きいと左右で向きがずれている</div>`;
+        html += `<div class="res-big">${frontAsym >= 0 ? '+' : ''}${frontAsym.toFixed(2)}°</div></div>`;
+    }
+
+    // 注記
+    const modes = WHEELS.filter(w => wheelData[w]).map(w => wheelData[w].mode);
+    const hasMixed = modes.includes('world') && modes.includes('camera');
+    html += '<div class="res-card" style="font-size:11px;color:#888;">';
+    html += '⚠ ヨー角の絶対値はドデカ取付向きに依存します。同じ向きで取り付けた場合のみ相互比較が有効です。<br>';
+    if (hasMixed) html += '⚠ 一部の測定が異なるモード（world/camera混在）です。比較精度が低下する可能性があります。<br>';
+    html += 'キャンバーは各輪独立の絶対値です（IMU=重力基準）。</div>';
+
+    $('results-content').innerHTML = html;
+
+    // コピー用テキスト
+    const lines = ['=== ScanScope 4輪アライメント結果 ===', new Date().toLocaleString()];
+    for (const w of WHEELS) {
+        const d = wheelData[w];
+        if (d) lines.push(`${w}: ヨー${d.yaw >= 0 ? '+' : ''}${d.yaw.toFixed(2)}° キャンバー${d.camberImu != null ? (d.camberImu >= 0 ? '+' : '') + d.camberImu.toFixed(2) + '°' : '-'} 残差${d.residual.toFixed(1)}mm ${d.faces}面 (${d.mode})`);
+        else lines.push(`${w}: 未測定`);
+    }
+    if (wheelData.FL && wheelData.RL) lines.push(`左側トー差: ${(wheelData.FL.yaw - wheelData.RL.yaw) >= 0 ? '+' : ''}${(wheelData.FL.yaw - wheelData.RL.yaw).toFixed(2)}°`);
+    if (wheelData.FR && wheelData.RR) lines.push(`右側トー差: ${(wheelData.FR.yaw - wheelData.RR.yaw) >= 0 ? '+' : ''}${(wheelData.FR.yaw - wheelData.RR.yaw).toFixed(2)}°`);
+
+    const resultText = lines.join('\n');
+    $('copyResultBtn').onclick = () => {
+        navigator.clipboard.writeText(resultText).then(() => {
+            $('copyResultBtn').textContent = 'コピー済み ✓';
+            setTimeout(() => { $('copyResultBtn').textContent = '結果をコピー'; }, 2000);
+        });
+    };
+
+    $('results-panel').style.display = 'flex';
+}
+
+function hideResults() {
+    $('results-panel').style.display = 'none';
+}
+
+$('startBtn').onclick = () => init();
+</script>
+</body>
+</html>

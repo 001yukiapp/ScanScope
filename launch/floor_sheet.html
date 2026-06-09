@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScanScope フロアシート</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:#000; color:#fff; font-family:sans-serif; padding:20px; }
+h1 { font-size:16px; margin-bottom:10px; text-align:center; }
+.note { background:#1c1c1e; border-radius:10px; padding:12px; font-size:12px; color:#aaa; line-height:1.7; margin-bottom:14px; max-width:600px; margin-left:auto; margin-right:auto; }
+.note b { color:#fff; }
+.controls { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; margin-bottom:16px; font-size:12px; color:#aaa; }
+.controls label { display:flex; align-items:center; gap:6px; }
+.controls input[type=range] { width:120px; }
+#sheet { display:inline-block; background:#fff; position:relative; }
+.tag-cell { position:absolute; border:4px solid #000; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#fff; }
+.tag-inner { width:80%; height:80%; border:2px solid #000; display:flex; align-items:center; justify-content:center; }
+.tag-id { font-size:12px; font-weight:bold; color:#000; }
+.tag-coord { font-size:9px; color:#444; margin-top:2px; }
+.center-mark { position:absolute; width:6px; height:6px; border-radius:50%; background:#f00; transform:translate(-50%,-50%); }
+.tag-img-placeholder { width:100%; height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; border:3px dashed #ccc; }
+.tag-img-placeholder .big-id { font-size:28px; font-weight:900; color:#333; }
+.tag-img-placeholder .hint { font-size:8px; color:#999; text-align:center; line-height:1.4; padding:0 4px; }
+#verify-section { max-width:600px; margin:16px auto; background:#1c1c1e; border-radius:10px; padding:12px; font-size:12px; }
+#verify-section h3 { font-size:13px; margin-bottom:8px; }
+#verify-canvas { border:1px solid #333; border-radius:6px; display:block; max-width:100%; }
+.ver-row { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid #2c2c2e; font-size:11px; }
+</style>
+</head>
+<body>
+<h1>ScanScope フロアシート — ID 44〜47</h1>
+
+<div class="note">
+  <b>このシートの使い方</b><br>
+  1. 下の4枚の枠に <b>tag36h11 の ID 44〜47</b> の本物タグ画像を重ねて配置します<br>
+  2. PCの画面またはA3印刷で床に置きます<br>
+  3. タグ中心間距離が <b>200mm</b> になるようDPIスライダーで調整してください<br><br>
+  <b>タグ画像の入手方法（いずれか）</b><br>
+  ・Pythonで生成: <code>pip install apriltag && python generate_tags.py</code>（同梱スクリプト）<br>
+  ・オンライン: 「AprilTag generator tag36h11」で検索 → ID 44〜47を保存<br>
+  ・公式リポジトリ: AprilRobotics/apriltag-imgs の tag36h11/ フォルダ
+</div>
+
+<div class="controls">
+  <label>
+    画面DPI:
+    <input type="range" id="dpi-sl" min="72" max="220" value="96" step="1" oninput="render()">
+    <b id="dpi-v">96</b> dpi
+  </label>
+  <label>
+    タグサイズ:
+    <input type="range" id="tag-sl" min="60" max="300" value="150" step="5" oninput="render()">
+    <b id="tag-v">150</b> px
+  </label>
+  <span>中心間隔: <b id="spacing-v">-</b></span>
+</div>
+
+<div style="text-align:center;">
+<div id="sheet"></div>
+</div>
+
+<div id="verify-section">
+  <h3>検出確認（カメラで映して確認）</h3>
+  <p style="color:#888;font-size:11px;margin-bottom:8px;">align4.htmlで床タグが検出されたか確認できます。このページはレイアウトのみ提供します。</p>
+  <div style="font-size:11px;color:#555;margin-top:8px;">
+    ※ 床タグが検出されない場合は「固定カメラモード」でも4輪測定が可能です（カメラを動かさない方式）。
+  </div>
+</div>
+
+<script>
+const TAGS = [
+  { id:44, label:'#44', coord:'(0, 0) 原点', gx:0, gy:0 },
+  { id:45, label:'#45', coord:'(+200mm, 0)',  gx:1, gy:0 },
+  { id:46, label:'#46', coord:'(0, +200mm)',  gx:0, gy:1 },
+  { id:47, label:'#47', coord:'(+200mm, +200mm)', gx:1, gy:1 },
+];
+
+function render() {
+  const dpi = parseInt(document.getElementById('dpi-sl').value);
+  const tagPx = parseInt(document.getElementById('tag-sl').value);
+  document.getElementById('dpi-v').textContent = dpi;
+  document.getElementById('tag-v').textContent = tagPx;
+
+  const spacingMm = 200;
+  const mmPx = dpi / 25.4; // px per mm
+  const spacingPx = spacingMm * mmPx;
+  document.getElementById('spacing-v').textContent = spacingPx.toFixed(0) + 'px = ' + spacingMm + 'mm @' + dpi + 'dpi';
+
+  const margin = tagPx * 0.6;
+  const totalW = spacingPx + tagPx + margin * 2;
+  const totalH = spacingPx + tagPx + margin * 2;
+
+  const sheet = document.getElementById('sheet');
+  sheet.style.width = totalW + 'px';
+  sheet.style.height = totalH + 'px';
+  sheet.innerHTML = '';
+
+  for (const t of TAGS) {
+    const cx = margin + t.gx * spacingPx;
+    const cy = margin + t.gy * spacingPx;
+
+    // タグセル
+    const cell = document.createElement('div');
+    cell.style.cssText = `position:absolute; left:${cx - tagPx/2}px; top:${cy - tagPx/2}px; width:${tagPx}px; height:${tagPx}px; border:3px solid #000; background:#fff;`;
+
+    // プレースホルダー（実際のタグ画像を上に重ねる想定）
+    const ph = document.createElement('div');
+    ph.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;border:3px dashed #ccc;';
+    const bigId = document.createElement('div');
+    bigId.style.cssText = 'font-size:' + (tagPx * 0.22) + 'px;font-weight:900;color:#333;';
+    bigId.textContent = t.label;
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:' + (tagPx * 0.07) + 'px;color:#999;text-align:center;line-height:1.4;padding:0 4px;';
+    hint.textContent = 'tag36h11\nここにタグ画像を貼る';
+    ph.appendChild(bigId); ph.appendChild(hint);
+    cell.appendChild(ph);
+
+    // センターマーク（赤点）
+    const dot = document.createElement('div');
+    dot.style.cssText = `position:absolute;width:6px;height:6px;border-radius:50%;background:red;top:50%;left:50%;transform:translate(-50%,-50%);`;
+    cell.appendChild(dot);
+
+    // 座標ラベル
+    const lbl = document.createElement('div');
+    lbl.style.cssText = 'position:absolute;top:100%;left:50%;transform:translateX(-50%);font-size:9px;color:#333;white-space:nowrap;margin-top:3px;';
+    lbl.textContent = t.coord;
+    cell.appendChild(lbl);
+
+    sheet.appendChild(cell);
+
+    // グリッド線（中心間）
+    if (t.gx === 0 && t.gy === 0) {
+      // 横線
+      const hl = document.createElement('div');
+      hl.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;width:${spacingPx}px;height:1px;background:rgba(255,0,0,0.3);transform:translateY(-0.5px);`;
+      sheet.appendChild(hl);
+      // 縦線
+      const vl = document.createElement('div');
+      vl.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;width:1px;height:${spacingPx}px;background:rgba(255,0,0,0.3);transform:translateX(-0.5px);`;
+      sheet.appendChild(vl);
+      // 対角線
+      const svgLine = document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svgLine.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;width:${spacingPx}px;height:${spacingPx}px;pointer-events:none;overflow:visible;`;
+      svgLine.setAttribute('viewBox', `0 0 ${spacingPx} ${spacingPx}`);
+      const line1 = document.createElementNS('http://www.w3.org/2000/svg','line');
+      line1.setAttribute('x1','0');line1.setAttribute('y1','0');
+      line1.setAttribute('x2',spacingPx);line1.setAttribute('y2',spacingPx);
+      line1.setAttribute('stroke','rgba(255,0,0,0.15)');line1.setAttribute('stroke-width','1');
+      svgLine.appendChild(line1);
+      sheet.appendChild(svgLine);
+      // 距離ラベル
+      const dml = document.createElement('div');
+      dml.style.cssText = `position:absolute;left:${cx + spacingPx/2}px;top:${cy - 16}px;transform:translateX(-50%);font-size:10px;color:red;`;
+      dml.textContent = '200mm';
+      sheet.appendChild(dml);
+    }
+  }
+}
+
+render();
+</script>
+</body>
+</html>
