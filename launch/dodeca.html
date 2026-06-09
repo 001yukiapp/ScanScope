@@ -7,7 +7,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.4.0';
+    const _V = 'd0.5.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.4.0</p>
+    <p style="color:#555;">d0.5.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -347,10 +347,12 @@ function fuseBody(g, list){
         bp.push(P[d.id]); cp.push(d.pose.t);
         ws.push(Math.sqrt(tagPx(d)));
     }
-    if(bp.length<5) return null;
+    if(bp.length<4) return null;
     const sol=WMGeom.hornPoseRobust(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
-    return { R:sol.R, residual:sol.rms*1000, faces, total:bp.length };
+    const residual=sol.rms*1000;
+    if(residual>8) return null;                            // 残差8mm超は品質不足で棄却
+    return { R:sol.R, residual, faces, total:bp.length };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -359,6 +361,7 @@ let refPose = null;
 // ===== 単体診断：本体姿勢の時間ブレ（ノイズ床）=====
 // カメラ・ターゲットを止めた状態での統合姿勢のゆらぎ＝測定の再現性。
 const bodyHist={ A:[], B:[] }, BODY_HIST=60;
+const noTargetFrames={ A:0, B:0 }, HIST_CLEAR_DELAY=5; // 5フレーム連続なしでクリア
 function pushBody(g,R){ const arr=bodyHist[g]; arr.push(matToQuat(R)); if(arr.length>BODY_HIST) arr.shift(); }
 function bodyStability(g){
     const arr=bodyHist[g]; if(arr.length<5) return null;
@@ -469,8 +472,11 @@ function doMeasure(groups){
     $('lbl-mode').textContent = calibrating ? 'モード（キャリブ中）' : 'モード（FPS=画像認識頻度）';
 
     // 単体診断：本体姿勢の時間ブレを追跡（片側だけ映っていても回す）
-    if(a) pushBody('A',a.R); else bodyHist.A.length=0;
-    if(b) pushBody('B',b.R); else bodyHist.B.length=0;
+    // 遅延クリア：短い遮蔽でヒストリを保持し、復帰直後バイアスを軽減
+    if(a){ pushBody('A',a.R); noTargetFrames.A=0; }
+    else { noTargetFrames.A++; if(noTargetFrames.A>=HIST_CLEAR_DELAY) bodyHist.A.length=0; }
+    if(b){ pushBody('B',b.R); noTargetFrames.B=0; }
+    else { noTargetFrames.B++; if(noTargetFrames.B>=HIST_CLEAR_DELAY) bodyHist.B.length=0; }
 
     if(!a||!b){
         autoToeHist=[];                                    // 片側のみ→自動確定バッファリセット
@@ -638,11 +644,16 @@ $('zeroBtn').onclick=()=>setZero();
 $('lockBtn').onclick=()=>{
     const btn=$('lockBtn');
     if(refPose){ refPose=null; btn.textContent='視点ロック'; btn.style.background=''; addLog('視点ロック解除'); return; }
-    const g=['A','B'].find(g=>bodyHist[g].length>=5);
-    if(!g){ addLog('視点ロック失敗: キャリブ済みドデカを映してから'); return; }
-    const grp=bodyHist[g]; refPose=quatToMat(quatAvg(grp.slice(-Math.min(10,grp.length))));
+    const g=['A','B'].find(g=>bodyHist[g].length>=30&&(bodyStability(g)||99)<0.5);
+    if(!g){
+        const gAny=['A','B'].find(g=>bodyHist[g].length>=5);
+        const stab=gAny?bodyStability(gAny):null;
+        addLog(`視点ロック失敗: 姿勢が安定していません（ブレ${stab!=null?stab.toFixed(2)+'°':'不明'}・0.5°以下になるまで静止）`);
+        return;
+    }
+    const grp=bodyHist[g]; refPose=quatToMat(quatAvg(grp.slice(-30)));
     btn.textContent='ロック解除'; btn.style.background='#34d058';
-    addLog('視点ロック: カメラを左右に動かして視点差分を確認。1°未満なら視点バイアス消失。');
+    addLog(`視点ロック（安定${bodyStability(g).toFixed(2)}°）: カメラを左右に動かして視点差分を確認。1°未満なら視点バイアス消失。`);
 };
 $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点を解除しました'); };
 $('measureBtn').onclick=()=>startMeasure();
