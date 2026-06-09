@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <meta http-equiv="Cache-Control" content="no-cache">
-    <title>ScanScope 正十二面体モード</title>
+    <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.6.0';
+    const _V = 'd0.7.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,10 +41,10 @@
 <body>
 
 <div id="start-screen">
-    <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.6.0</p>
-    <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
+    <h1>ScanScope ファセットボスモード</h1>
+    <p style="color:#555;">d0.7.0</p>
+    <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
+       前ターゲット = ID 1〜7<br>後ターゲット = ID 11〜17<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
        ③ 調整後に測定 → Δが変化量</p>
@@ -64,8 +64,7 @@
 
     <div id="panel">
         <div class="row"><span class="lbl" id="lbl-mode">モード</span><span class="val" id="s-status">-</span></div>
-        <div class="row"><span class="lbl">前(A) 見えてる/学習済み</span><span class="val" id="s-a">-</span></div>
-        <div class="row"><span class="lbl">後(B) 見えてる/学習済み</span><span class="val" id="s-b">-</span></div>
+        <div id="group-rows"></div>
         <div style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
             <div class="row">
                 <span class="lbl" id="lbl-main" style="max-width:55%;line-height:1.3;">-</span>
@@ -116,9 +115,16 @@ const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
 let detector = null;
 let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 
-// ===== グループ分け（どのIDがどちらのホイールか）=====
-const ID_SPLIT = 12;                 // id < 12 → A（前ID1〜11）、それ以上 → B
-function groupOf(id) { return id < ID_SPLIT ? 'A' : 'B'; }
+// ===== グループ定義（ファセットボス7面×2ターゲット）=====
+// 将来4ターゲット対応時はここにC/D行を追加するだけ
+const GROUPS = [
+    { key:'A', label:'前', idMin:1,  idMax:7  },
+    { key:'B', label:'後', idMin:11, idMax:17 },
+];
+function groupOf(id){
+    const g=GROUPS.find(g=>id>=g.idMin&&id<=g.idMax);
+    return g?g.key:null;
+}
 
 // ===== 剛体モデル（位置ベース自己キャリブレーション）=====
 // P[id] = この面タグ中心の本体フレーム3D座標（メートル）。傾きは使わない。
@@ -130,12 +136,13 @@ let baseline = loadBaseline();       // number | null
 function loadBaseline(){ const s=localStorage.getItem('scanscope_dodeca_baseline'); return s!=null?parseFloat(s):null; }
 function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_dodeca_baseline'); else localStorage.setItem('scanscope_dodeca_baseline',String(baseline)); }
 
+function emptyModel(){ return Object.fromEntries(GROUPS.map(g=>[g.key,{P:{}}])); }
 function loadModel() {
     try {
         const s = localStorage.getItem('scanscope_dodeca_model');
         if (s) return JSON.parse(s);
     } catch(e) {}
-    return { A:{ P:{} }, B:{ P:{} } };
+    return emptyModel();
 }
 function saveModel() {
     localStorage.setItem('scanscope_dodeca_model', JSON.stringify(model));
@@ -254,7 +261,7 @@ async function startCamera(){
     overlay.width=video.videoWidth; overlay.height=video.videoHeight;
     detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
     const sz=(parseFloat($('tagSizeInput').value)||40)/1000;
-    for(let i=0;i<=21;i++) detector.set_tag_size(i,sz);
+    GROUPS.forEach(g=>{ for(let i=g.idMin;i<=g.idMax;i++) detector.set_tag_size(i,sz); });
     $('loading').style.display='none';
     $('main').style.display='block';
     requestAnimationFrame(loop);
@@ -286,8 +293,8 @@ function process(){
     usable.forEach(drawTag);
 
     // グループ分け
-    const groups={A:[],B:[]};
-    usable.forEach(d=>groups[groupOf(d.id)].push(d));
+    const groups=Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
+    usable.forEach(d=>{ const gk=groupOf(d.id); if(gk) groups[gk].push(d); });
 
     if(calibrating){ doCalibrate(groups); }
     doMeasure(groups);
@@ -296,9 +303,9 @@ function process(){
 // ===== キャリブレーション（位置ベース）=====
 // 各フレームで見えたタグ中心(pose.t, メートル)を記録 → 中心間距離で3D配置を復元。
 // 傾き(tilt)を一切使わないため、ポーズ反転(flip)曖昧性の影響を受けない。
-let calibFrames = { A:[], B:[] };
+let calibFrames = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
 function doCalibrate(groups){
-    for(const g of ['A','B']){
+    for(const g of GROUPS.map(g=>g.key)){
         const list=groups[g].filter(d=>d.pose&&d.pose.t);
         if(list.length<2) continue;                        // 距離を測るには2面以上
         const fr={}; for(const d of list) fr[d.id]=d.pose.t;
@@ -311,7 +318,7 @@ function finishCalibrate(){
     $('calibBtn').textContent='キャリブ開始';
     $('calibBtn').className='warn';
     let msg=[];
-    for(const g of ['A','B']){
+    for(const g of GROUPS.map(g=>g.key)){
         const frames=calibFrames[g];
         if(frames.length<5) continue;                      // データ不足
         const idset=new Set(); frames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
@@ -330,7 +337,7 @@ function finishCalibrate(){
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
-    calibFrames={A:[],B:[]};
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; });
 }
 
 // ===== 本体姿勢推定（位置ベース・重み付きHorn法＋外れ値除去）=====
@@ -360,8 +367,8 @@ let refPose = null;
 
 // ===== 単体診断：本体姿勢の時間ブレ（ノイズ床）=====
 // カメラ・ターゲットを止めた状態での統合姿勢のゆらぎ＝測定の再現性。
-const bodyHist={ A:[], B:[] }, BODY_HIST=60;
-const noTargetFrames={ A:0, B:0 }, HIST_CLEAR_DELAY=5; // 5フレーム連続なしでクリア
+const bodyHist=Object.fromEntries(GROUPS.map(g=>[g.key,[]])), BODY_HIST=60;
+const noTargetFrames=Object.fromEntries(GROUPS.map(g=>[g.key,0])), HIST_CLEAR_DELAY=5;
 function pushBody(g,R){ const arr=bodyHist[g]; arr.push(matToQuat(R)); if(arr.length>BODY_HIST) arr.shift(); }
 function bodyStability(g){
     const arr=bodyHist[g]; if(arr.length<5) return null;
@@ -632,10 +639,20 @@ function setZero(){
 function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
 
 // ===== ボタン =====
+// グループ行をGROUPSから動的生成
+(()=>{
+    const c=$('group-rows');
+    GROUPS.forEach(g=>{
+        const d=document.createElement('div'); d.className='row';
+        d.innerHTML=`<span class="lbl">${g.label}(${g.key}) ID${g.idMin}〜${g.idMax} 見えてる/学習済み</span><span class="val" id="s-${g.key}">-</span>`;
+        c.appendChild(d);
+    });
+})();
+
 $('startBtn').onclick=()=>init();
 $('calibBtn').onclick=()=>{
     if(!calibrating){
-        calibrating=true; calibFrames.A=[]; calibFrames.B=[];
+        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; });
         $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
         addLog('キャリブ開始: A・Bを順に回して全面を見せる');
     } else finishCalibrate();
@@ -659,7 +676,7 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
 $('recordBtn').textContent='記録開始';
-$('resetBtn').onclick=()=>{ model={A:{P:{}},B:{P:{}}}; saveModel(); addLog('学習モデルを消去しました'); };
+$('resetBtn').onclick=()=>{ model=emptyModel(); saveModel(); addLog('学習モデルを消去しました'); };
 </script>
 </body>
 </html>
