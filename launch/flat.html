@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>ScanScope フラットタグモード</title>
     <script>
-    const _V = 'f0.1.0';
+    const _V = 'f0.2.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -39,7 +39,7 @@
 
 <div id="start-screen">
     <h1>ScanScope フラットタグモード</h1>
-    <p style="color:#555;">f0.1.0</p>
+    <p style="color:#555;">f0.2.0</p>
     <p>大型タグ1枚のポーズを直接使う。<br>多面統合なし・最小構成で視点バイアスを確認。<br><br>
        前タグ = ID A（デフォルト0）<br>
        後タグ = ID B（デフォルト1）<br><br>
@@ -250,23 +250,78 @@ async function init(){
             }
         };
         $('loading-msg').textContent='カメラ起動中...';
-        await startCamera();
+        await startCamera(null, true);
     }catch(e){ $('loading-msg').textContent='エラー: '+e.message; }
 }
 
-async function startCamera(){
-    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
-    video.srcObject=stream;
+let currentStream=null, loopStarted=false;
+
+async function startCamera(deviceId=null, firstTime=false){
+    if(currentStream) currentStream.getTracks().forEach(t=>t.stop());
+    const vc = deviceId
+        ? {deviceId:{exact:deviceId}, width:{ideal:1920}, height:{ideal:1080}}
+        : {facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}};
+    currentStream = await navigator.mediaDevices.getUserMedia({video:vc, audio:false});
+    video.srcObject = currentStream;
     await new Promise(r=>{video.onloadedmetadata=r;});
     overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+
+    // ズームを最小（広角固定）に試みる
+    const track = currentStream.getVideoTracks()[0];
+    try{ const caps=track.getCapabilities(); if(caps.zoom) await track.applyConstraints({advanced:[{zoom:caps.zoom.min}]}); }catch(e){}
+
+    const settings = track.getSettings();
+    const activeId = settings.deviceId||'';
+
     detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
     const sz=(parseFloat($('tagSizeInput').value)||36)/1000;
     for(let i=0;i<=587;i++) detector.set_tag_size(i,sz);
+
+    // カメラ一覧を取得してセレクタを更新（初回は権限取得後に取れるようになる）
+    try{
+        const devices=await navigator.mediaDevices.enumerateDevices();
+        const cams=devices.filter(d=>d.kind==='videoinput');
+        buildCameraSelector(cams, activeId);
+    }catch(e){}
+
     $('s-a').textContent=`ID${ID_A} / 未検出`;
     $('s-b').textContent=`ID${ID_B} / 未検出`;
     $('loading').style.display='none';
     $('main').style.display='block';
-    requestAnimationFrame(loop);
+    if(!loopStarted){ loopStarted=true; requestAnimationFrame(loop); }
+}
+
+function buildCameraSelector(cams, activeId){
+    let wrap=$('cam-wrap');
+    if(!wrap){
+        wrap=document.createElement('div');
+        wrap.id='cam-wrap';
+        wrap.style='position:absolute;top:10px;left:10px;right:10px;margin-top:var(--panel-h,160px);background:rgba(0,0,0,0.78);backdrop-filter:blur(10px);border-radius:10px;padding:6px 12px;display:flex;align-items:center;gap:8px;';
+        const lbl=document.createElement('span');
+        lbl.textContent='カメラ固定:'; lbl.style='color:#888;font-size:11px;white-space:nowrap;';
+        const sel=document.createElement('select');
+        sel.id='cam-sel';
+        sel.style='flex:1;background:#222;color:#fff;border:1px solid #555;border-radius:6px;padding:5px 6px;font-size:12px;';
+        sel.onchange=async()=>{
+            $('loading').style.display='flex'; $('loading-msg').textContent='カメラ切り替え中...';
+            await startCamera(sel.value);
+        };
+        wrap.appendChild(lbl); wrap.appendChild(sel);
+        $('main').appendChild(wrap);
+    }
+    const sel=$('cam-sel');
+    sel.innerHTML='';
+    cams.forEach((c,i)=>{
+        const opt=document.createElement('option');
+        opt.value=c.deviceId;
+        // iOSのカメラ名をそのまま表示（"Back Camera"=広角）
+        opt.textContent=c.label||`カメラ${i+1}`;
+        if(c.deviceId===activeId) opt.selected=true;
+        sel.appendChild(opt);
+    });
+    // パネルの高さに合わせてラップを下にずらす
+    const panel=$('panel');
+    if(panel) wrap.style.marginTop=(panel.offsetHeight+15)+'px';
 }
 
 // ===== メインループ =====
@@ -308,7 +363,8 @@ function process(){
         ctx.fillText(`ID${d.id}`, c[0].x+4, c[0].y-4);
     });
 
-    $('s-status').innerHTML=`<span class="good">測定中</span> FPS${fps}`;
+    const camName=(()=>{ const s=$('cam-sel'); return s&&s.selectedOptions[0]?s.selectedOptions[0].textContent:''; })();
+    $('s-status').innerHTML=`<span class="good">測定中</span> FPS${fps}${camName?' | '+camName:''}`;
     $('s-a').textContent=detA?`ID${ID_A} / 検出 ${tagPx(detA).toFixed(0)}px`:`ID${ID_A} / 未検出`;
     $('s-b').textContent=detB?`ID${ID_B} / 検出 ${tagPx(detB).toFixed(0)}px`:`ID${ID_B} / 未検出`;
 
