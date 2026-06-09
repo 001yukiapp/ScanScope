@@ -7,7 +7,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.3.0';
+    const _V = 'd0.4.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.3.0</p>
+    <p style="color:#555;">d0.4.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -334,8 +334,10 @@ function finishCalibrate(){
 }
 
 // ===== 本体姿勢推定（位置ベース・重み付きHorn法＋外れ値除去）=====
-// 重み = タグ入射角のcos（カメラ正面に近いタグほど高重み）
+// 重み = sqrt(tagPx)：画像上のタグサイズ（Flip曖昧性に依存しない）
+// 近い・正面寄りのタグほど大きく映り高品質 → 高重み。
 // hornPoseRobust で残差大タグを自動除外してから再推定。
+// 最低5面必要（4面以下では外れ値1枚で解が崩壊するため）。
 // 戻り値 { R, residual(mm), faces, total }
 function fuseBody(g, list){
     const P=model[g].P||{};
@@ -343,11 +345,9 @@ function fuseBody(g, list){
     for(const d of list){
         if(!P[d.id]||!d.pose||!d.pose.t) continue;
         bp.push(P[d.id]); cp.push(d.pose.t);
-        // タグz軸のカメラ系z成分 = 入射角のcos（R[2][2]）
-        const R=d.pose.R;
-        ws.push(R ? Math.max(0.1, R[2][2]) : 1);
+        ws.push(Math.sqrt(tagPx(d)));
     }
-    if(bp.length<3) return null;
+    if(bp.length<5) return null;
     const sol=WMGeom.hornPoseRobust(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
     return { R:sol.R, residual:sol.rms*1000, faces, total:bp.length };
