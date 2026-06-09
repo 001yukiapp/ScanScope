@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ScanScope フラットタグモード</title>
+    <script>
+    const _V = 'f0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; height:100svh; overflow:hidden; }
+        #start-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:0 24px; text-align:center; }
+        #start-screen h1 { font-size:22px; }
+        #start-screen p { color:#888; font-size:13px; line-height:1.7; }
+        #main { position:absolute; inset:0; display:none; }
+        video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        canvas#overlay { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+        #panel { position:absolute; top:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:12px 14px; }
+        .row { display:flex; justify-content:space-between; align-items:flex-start; padding:3px 0; font-size:13px; }
+        .lbl { color:#888; font-size:11px; max-width:58%; line-height:1.4; }
+        .val { font-weight:600; }
+        .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
+        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        #log-header { position:absolute; bottom:162px; left:10px; right:10px; display:flex; justify-content:space-between; align-items:center; padding:0 4px 2px; }
+        #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:150px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
+        .entry { border-bottom:1px solid #222; padding:2px 0; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        #loading { position:absolute; inset:0; background:#111; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+        .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        input[type=number] { width:54px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+        .sep { border-top:1px solid #333; margin-top:4px; padding-top:6px; }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <h1>ScanScope フラットタグモード</h1>
+    <p style="color:#555;">f0.1.0</p>
+    <p>大型タグ1枚のポーズを直接使う。<br>多面統合なし・最小構成で視点バイアスを確認。<br><br>
+       前タグ = ID A（デフォルト0）<br>
+       後タグ = ID B（デフォルト1）<br><br>
+       タグサイズは黒部の実測値（mm）を入力。</p>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;">
+        <label style="color:#888;font-size:13px;">タグサイズ</label>
+        <input id="tagSizeInput" type="number" value="36" min="5" max="500">
+        <span style="color:#888;font-size:13px;">mm</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;">
+        <label style="color:#888;font-size:13px;">前タグID</label>
+        <input id="idAInput" type="number" value="0" min="0" max="587">
+        <label style="color:#888;font-size:13px;">後タグID</label>
+        <input id="idBInput" type="number" value="1" min="0" max="587">
+    </div>
+    <button id="startBtn">カメラ起動</button>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg" style="color:#888;">WASM読み込み中...</p></div>
+
+<div id="main">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+        <div class="row">
+            <span class="lbl" id="lbl-mode">モード（FPS=画像認識頻度）</span>
+            <span class="val" id="s-status">-</span>
+        </div>
+        <div class="row">
+            <span class="lbl">前タグ(A) ID / 検出</span>
+            <span class="val" id="s-a">-</span>
+        </div>
+        <div class="row">
+            <span class="lbl">後タグ(B) ID / 検出</span>
+            <span class="val" id="s-b">-</span>
+        </div>
+        <div class="sep">
+            <div class="row">
+                <span class="lbl" id="lbl-main">-</span>
+                <span class="val" id="s-delta" style="font-size:22px;">-</span>
+            </div>
+            <div class="row" style="margin-top:4px;">
+                <span class="lbl" id="lbl-sub1">-</span>
+                <span class="val" id="s-toe">-</span>
+            </div>
+            <div class="row" style="margin-top:2px;">
+                <span class="lbl" id="lbl-sub2">-</span>
+                <span class="val" id="s-resid">-</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="controls">
+        <button id="lockBtn" class="sec">視点ロック</button>
+        <button id="zeroBtn">ゼロ点設定</button>
+        <button id="zeroClrBtn" class="sec">ゼロ解除</button>
+        <button id="recordBtn" class="sec">記録開始</button>
+    </div>
+
+    <div id="log-header">
+        <span style="font-size:11px;color:#666;" id="log-title">ログ</span>
+    </div>
+    <div id="log-panel" id="log-panel"></div>
+</div>
+
+<script src="./apriltag_wasm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
+const logEl = $('log-panel');
+
+let detector = null;
+let frameCount = 0, fps = 0, lastFpsTime = performance.now();
+let ID_A = 0, ID_B = 1;
+
+// ===== 姿勢履歴（視点ブレ計算用）=====
+const poseHist = { A:[], B:[] };
+const HIST_LEN = 30;
+
+function matToQuat(R){
+    const t=R[0][0]+R[1][1]+R[2][2]; let q;
+    if(t>0){const s=Math.sqrt(t+1)*2; q=[0.25*s,(R[2][1]-R[1][2])/s,(R[0][2]-R[2][0])/s,(R[1][0]-R[0][1])/s];}
+    else if(R[0][0]>R[1][1]&&R[0][0]>R[2][2]){const s=Math.sqrt(1+R[0][0]-R[1][1]-R[2][2])*2; q=[(R[2][1]-R[1][2])/s,0.25*s,(R[0][1]+R[1][0])/s,(R[0][2]+R[2][0])/s];}
+    else if(R[1][1]>R[2][2]){const s=Math.sqrt(1+R[1][1]-R[0][0]-R[2][2])*2; q=[(R[0][2]-R[2][0])/s,(R[0][1]+R[1][0])/s,0.25*s,(R[1][2]+R[2][1])/s];}
+    else {const s=Math.sqrt(1+R[2][2]-R[0][0]-R[1][1])*2; q=[(R[1][0]-R[0][1])/s,(R[0][2]+R[2][0])/s,(R[1][2]+R[2][1])/s,0.25*s];}
+    const n=Math.hypot(q[0],q[1],q[2],q[3])||1; return [q[0]/n,q[1]/n,q[2]/n,q[3]/n];
+}
+function quatToMat(q){
+    const [w,x,y,z]=q;
+    return [[1-2*(y*y+z*z),2*(x*y-w*z),2*(x*z+w*y)],[2*(x*y+w*z),1-2*(x*x+z*z),2*(y*z-w*x)],[2*(x*z-w*y),2*(y*z+w*x),1-2*(x*x+y*y)]];
+}
+function qNorm(q){const n=Math.hypot(q[0],q[1],q[2],q[3])||1;return[q[0]/n,q[1]/n,q[2]/n,q[3]/n];}
+function qDot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3];}
+function quatAvg(list){
+    if(!list.length)return null;
+    const q0=list[0]; let acc=[0,0,0,0];
+    for(let q of list){if(qDot(q,q0)<0)q=[-q[0],-q[1],-q[2],-q[3]];for(let i=0;i<4;i++)acc[i]+=q[i];}
+    return qNorm(acc);
+}
+function matT(R){return[[R[0][0],R[1][0],R[2][0]],[R[0][1],R[1][1],R[2][1]],[R[0][2],R[1][2],R[2][2]]];}
+function matMul(A,B){
+    const C=[[0,0,0],[0,0,0],[0,0,0]];
+    for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=A[i][k]*B[k][j];C[i][j]=s;}
+    return C;
+}
+function angBetween(Ra,Rb){
+    const M=matMul(matT(Ra),Rb), tr=M[0][0]+M[1][1]+M[2][2];
+    return Math.acos(Math.max(-1,Math.min(1,(tr-1)/2)))*180/Math.PI;
+}
+
+// トーヨー（前後タグ間の水平回転差）
+function toeYaw(Ra, Rb){
+    const nB=[Rb[0][2],Rb[1][2],Rb[2][2]];
+    const nA=[Ra[0][0]*nB[0]+Ra[1][0]*nB[1]+Ra[2][0]*nB[2],Ra[0][1]*nB[0]+Ra[1][1]*nB[1]+Ra[2][1]*nB[2],Ra[0][2]*nB[0]+Ra[1][2]*nB[1]+Ra[2][2]*nB[2]];
+    return Math.atan2(nA[0],nA[2])*180/Math.PI;
+}
+
+// ===== 視点ロック =====
+let refPose = { A:null, B:null };
+
+// ===== ゼロ点 =====
+let baseline = null;
+function loadBaseline(){ const s=localStorage.getItem('scanscope_flat_baseline'); return s!=null?parseFloat(s):null; }
+function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_flat_baseline'); else localStorage.setItem('scanscope_flat_baseline',String(baseline)); }
+baseline = loadBaseline();
+
+// ===== 連続記録 =====
+let recording=false, recordLog=[], recordStart=0, recordTimer=null;
+let _lastEst=null;
+
+function startRecord(){
+    recording=true; recordLog=[]; recordStart=performance.now();
+    const btn=$('recordBtn'); btn.textContent='■停止'; btn.style.background='#ff3b30'; btn.style.color='';
+    btn.onclick=()=>stopRecord();
+    $('log-title').textContent='記録中…';
+    addLog(`=== 記録開始 ${new Date().toLocaleTimeString()} ===`);
+    recordTimer=setInterval(()=>{
+        const el=((performance.now()-recordStart)/1000).toFixed(1);
+        const d=_lastEst;
+        if(!d){ recordLog.push(`[+${el}s] ターゲットなし FPS:${fps}`); return; }
+        if(d.mode==='single'){
+            const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°[ロック]`:' ロックなし';
+            recordLog.push(`[+${el}s] 単体 ID${d.id} | 距離:${d.dist.toFixed(2)}m${vd} FPS:${fps}`);
+        } else {
+            const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
+            const vd=d.viewDiffA!=null?` 視点差分A:${d.viewDiffA.toFixed(2)}°B:${d.viewDiffB.toFixed(2)}°`:'';
+            recordLog.push(`[+${el}s] トー測定 | A距離:${d.distA.toFixed(2)}m B距離:${d.distB.toFixed(2)}m 絶対トー:${d.toe.toFixed(2)}°${dstr}${vd} FPS:${fps}`);
+        }
+    },500);
+}
+
+function stopRecord(){
+    clearInterval(recordTimer); recording=false;
+    const dur=((performance.now()-recordStart)/1000).toFixed(1);
+    $('log-title').textContent=`ログ（${recordLog.length}件）`;
+    const vds=recordLog.map(l=>{const m=l.match(/視点差分[AB]*:([\d.]+)/);return m?+m[1]:null}).filter(x=>x!=null);
+    const toes=recordLog.map(l=>{const m=l.match(/絶対トー:([-\d.]+)/);return m?+m[1]:null}).filter(x=>x!=null);
+    const avg=a=>a.length?(a.reduce((s,v)=>s+v,0)/a.length).toFixed(2):'-';
+    let summary='';
+    if(vds.length) summary+=` 視点差分avg:${avg(vds)}° max:${Math.max(...vds).toFixed(2)}°`;
+    if(toes.length) summary+=` 絶対トーavg:${avg(toes)}°`;
+    const header=`=== 記録終了 +${dur}s (${recordLog.length}サンプル)${summary} ===`;
+    recordLog.push(header);
+    const fullText=[`=== 記録 ${new Date().toLocaleTimeString()} ===`,...recordLog].join('\n');
+    addLog(header);
+    recordLog.forEach(l=>{ const e=document.createElement('div'); e.className='entry'; e.textContent=l; logEl.appendChild(e); });
+    recordLog=[];
+    const btn=$('recordBtn');
+    btn.textContent='↑ ここを押してコピー'; btn.style.background='#34d058'; btn.style.color='#000';
+    btn.onclick=()=>{
+        navigator.clipboard.writeText(fullText).then(()=>{
+            btn.textContent='コピー済み ✓';
+            setTimeout(()=>{ btn.textContent='記録開始'; btn.style.background=''; btn.style.color=''; btn.onclick=()=>{ if(recording) stopRecord(); else startRecord(); }; },2000);
+        });
+    };
+}
+
+// ===== 初期化 =====
+async function init(){
+    ID_A = parseInt($('idAInput').value)||0;
+    ID_B = parseInt($('idBInput').value)||1;
+    $('start-screen').style.display='none';
+    $('loading').style.display='flex';
+    try{
+        const Module=await AprilTagWasm();
+        const _init=Module.cwrap('atagjs_init','number',[]);
+        const _setOpt=Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose=Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf=Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize=Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect=Module.cwrap('atagjs_detect','number',[]);
+        _init();
+        _setOpt(1.0,0.0,1,1,0,1,1);
+        detector={
+            set_camera_info:(fx,fy,cx,cy)=>_setPose(fx,fy,cx,cy),
+            set_tag_size:(id,sz)=>_setSize(id,sz),
+            detect:(g,w,h)=>{
+                const buf=_setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr=_detect(); const len=Module.getValue(ptr,'i32');
+                if(len===0) return [];
+                const sp=Module.getValue(ptr+4,'i32');
+                const view=new Uint8Array(Module.HEAP8.buffer,sp,len);
+                let j=''; for(let i=0;i<len;i++) j+=String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        $('loading-msg').textContent='カメラ起動中...';
+        await startCamera();
+    }catch(e){ $('loading-msg').textContent='エラー: '+e.message; }
+}
+
+async function startCamera(){
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    video.srcObject=stream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    overlay.width=video.videoWidth; overlay.height=video.videoHeight;
+    detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
+    const sz=(parseFloat($('tagSizeInput').value)||36)/1000;
+    for(let i=0;i<=587;i++) detector.set_tag_size(i,sz);
+    $('s-a').textContent=`ID${ID_A} / 未検出`;
+    $('s-b').textContent=`ID${ID_B} / 未検出`;
+    $('loading').style.display='none';
+    $('main').style.display='block';
+    requestAnimationFrame(loop);
+}
+
+// ===== メインループ =====
+function loop(){
+    try{
+        frameCount++;
+        const now=performance.now();
+        if(now-lastFpsTime>=1000){ fps=frameCount; frameCount=0; lastFpsTime=now; }
+        if(video.readyState>=2) process();
+    }catch(e){ console.warn(e); }
+    finally{ requestAnimationFrame(loop); }
+}
+
+const MIN_TAG_PX = 20; // 大タグ・遠距離対応で低めに設定
+function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+function tagDist(d){ return d.pose&&d.pose.t ? Math.hypot(d.pose.t[0],d.pose.t[1],d.pose.t[2]) : null; }
+
+function process(){
+    const W=video.videoWidth,H=video.videoHeight;
+    offscreen.width=W; offscreen.height=H;
+    offCtx.drawImage(video,0,0);
+    const img=offCtx.getImageData(0,0,W,H);
+    const gray=new Uint8Array(W*H);
+    for(let i=0;i<gray.length;i++) gray[i]=(img.data[i*4]*77+img.data[i*4+1]*151+img.data[i*4+2]*28)>>8;
+    let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+    ctx.clearRect(0,0,W,H);
+
+    const usable=dets.filter(d=>d.pose&&d.pose.R&&tagPx(d)>=MIN_TAG_PX);
+    const detA=usable.find(d=>d.id===ID_A);
+    const detB=usable.find(d=>d.id===ID_B);
+
+    usable.forEach(d=>{
+        const isA=d.id===ID_A, isB=d.id===ID_B;
+        ctx.strokeStyle=isA?'#34d058':isB?'#007aff':'#888';
+        ctx.lineWidth=3; ctx.beginPath();
+        const c=d.corners; ctx.moveTo(c[0].x,c[0].y);
+        for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
+        ctx.fillStyle=ctx.strokeStyle; ctx.font='bold 16px -apple-system';
+        ctx.fillText(`ID${d.id}`, c[0].x+4, c[0].y-4);
+    });
+
+    $('s-status').innerHTML=`<span class="good">測定中</span> FPS${fps}`;
+    $('s-a').textContent=detA?`ID${ID_A} / 検出 ${tagPx(detA).toFixed(0)}px`:`ID${ID_A} / 未検出`;
+    $('s-b').textContent=detB?`ID${ID_B} / 検出 ${tagPx(detB).toFixed(0)}px`:`ID${ID_B} / 未検出`;
+
+    if(detA && detB){
+        // 両方見えている → トー測定モード
+        const Ra=detA.pose.R, Rb=detB.pose.R;
+        const toe=toeYaw(Ra,Rb);
+        const delta=baseline!=null?toe-baseline:null;
+        const distA=tagDist(detA)||0, distB=tagDist(detB)||0;
+        const viewDiffA=refPose.A?angBetween(refPose.A,Ra):null;
+        const viewDiffB=refPose.B?angBetween(refPose.B,Rb):null;
+        _lastEst={mode:'dual',toe,delta,distA,distB,viewDiffA,viewDiffB};
+
+        $('lbl-main').textContent='Δトー＝ゼロ点基準の変化量（前後タグ間ヨー差の増減）';
+        const dEl=$('s-delta');
+        if(delta!=null){ dEl.textContent=(delta>=0?'+':'')+delta.toFixed(2)+'°'; dEl.className='val good'; }
+        else { dEl.textContent='ゼロ点未設定'; dEl.className='val mid'; }
+        $('lbl-sub1').textContent='絶対トー角＝前後タグ間ヨー差・カメラ位置に依存しない値';
+        $('s-toe').textContent=toe.toFixed(2)+'°';
+        $('lbl-sub2').textContent='ゼロ点 / 距離（前A・後B）';
+        $('s-resid').textContent=`${baseline!=null?baseline.toFixed(2)+'°':'ゼロ未'} / ${distA.toFixed(2)}・${distB.toFixed(2)}m`;
+
+    } else if(detA || detB){
+        // 片側だけ → 単体診断モード
+        const det=detA||detB, key=detA?'A':'B', id=detA?ID_A:ID_B;
+        const R=det.pose.R;
+        const dist=tagDist(det)||0;
+
+        // 姿勢履歴に積む
+        const arr=poseHist[key]; arr.push(matToQuat(R)); if(arr.length>HIST_LEN) arr.shift();
+
+        const viewDiff=refPose[key]?angBetween(refPose[key],R):null;
+        _lastEst={mode:'single',id,dist,viewDiff};
+
+        if(viewDiff!=null){
+            $('lbl-main').textContent='視点差分＝カメラ角度を変えたときの本体姿勢ずれ（1°未満=バイアスなし）';
+            $('s-delta').textContent=`${viewDiff.toFixed(2)}°`;
+            $('s-delta').className=viewDiff<1?'val good':viewDiff<3?'val mid':'val bad';
+        } else {
+            $('lbl-main').textContent='単体診断モード｜視点ロックで視点バイアスを検証';
+            $('s-delta').textContent=`ID${id} 検出中`;
+            $('s-delta').className='val good';
+        }
+        $('lbl-sub1').textContent='距離＝カメラ〜タグ中心（タグサイズ入力値で計算）';
+        $('s-toe').textContent=`${dist.toFixed(2)} m`;
+        $('lbl-sub2').textContent='検出サイズ（大きいほど精度◎）';
+        $('s-resid').textContent=`${tagPx(det).toFixed(0)} px`;
+
+    } else {
+        _lastEst=null;
+        $('lbl-main').textContent='タグを映してください';
+        $('s-delta').textContent='未検出'; $('s-delta').className='val mid';
+        $('s-toe').textContent='-'; $('s-resid').textContent='-';
+        $('lbl-sub1').textContent=''; $('lbl-sub2').textContent='';
+    }
+}
+
+function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
+
+// ===== ボタン =====
+$('startBtn').onclick=()=>init();
+$('lockBtn').onclick=()=>{
+    const btn=$('lockBtn');
+    if(refPose.A||refPose.B){
+        refPose={A:null,B:null}; btn.textContent='視点ロック'; btn.style.background='';
+        addLog('視点ロック解除'); return;
+    }
+    let locked=[];
+    if(_lastEst&&_lastEst.mode==='single'){
+        const key=_lastEst.id===ID_A?'A':'B';
+        const arr=poseHist[key];
+        if(arr.length>=3){ refPose[key]=quatToMat(quatAvg(arr)); locked.push(`ID${_lastEst.id}`); }
+    } else if(_lastEst&&_lastEst.mode==='dual'){
+        // 両方ロック（ただしposeHistはsingleでしか積まない）
+        addLog('視点ロック: 片方ずつ映してロックしてください'); return;
+    }
+    if(!locked.length){ addLog('視点ロック失敗: タグを映してから'); return; }
+    btn.textContent='ロック解除'; btn.style.background='#34d058';
+    addLog(`視点ロック: ${locked.join(',')}。カメラを動かして視点差分を確認。1°未満=バイアスなし。`);
+};
+$('zeroBtn').onclick=()=>{
+    if(!_lastEst||_lastEst.mode!=='dual'){ addLog('ゼロ点: 前後両タグを映してから'); return; }
+    baseline=_lastEst.toe; saveBaseline();
+    addLog(`ゼロ点設定: ${baseline.toFixed(2)}°`);
+};
+$('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点解除'); };
+$('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
+</script>
+</body>
+</html>
