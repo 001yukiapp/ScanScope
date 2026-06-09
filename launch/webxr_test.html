@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WebXR テスト</title>
+    <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; padding:20px; }
+        h1 { font-size:18px; margin-bottom:16px; }
+        .card { background:#1c1c1e; border-radius:12px; padding:14px; margin-bottom:12px; }
+        .label { color:#888; font-size:11px; margin-bottom:4px; }
+        .value { font-size:14px; font-weight:600; }
+        .ok { color:#34d058; }
+        .ng { color:#ff6b6b; }
+        .mid { color:#ffd700; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:14px 24px; font-size:16px; font-weight:600; width:100%; margin-bottom:10px; }
+        button:disabled { background:#333; color:#666; }
+        #log { background:#000; border-radius:10px; padding:12px; font-family:monospace; font-size:11px; line-height:1.6; height:200px; overflow-y:auto; margin-top:12px; }
+        .row { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #2c2c2e; }
+        canvas { display:none; }
+    </style>
+</head>
+<body>
+<h1>WebXR 動作テスト</h1>
+
+<!-- ① 対応チェック -->
+<div class="card">
+    <div class="label">① WebXR / immersive-ar 対応</div>
+    <div class="row"><span>navigator.xr</span><span id="chk-xr" class="value">確認中…</span></div>
+    <div class="row"><span>immersive-ar サポート</span><span id="chk-ar" class="value">確認中…</span></div>
+    <div class="row"><span>camera-access フィーチャー</span><span id="chk-cam" class="value">確認中…</span></div>
+</div>
+
+<!-- ② AR セッション -->
+<button id="btn-start" disabled>ARセッション開始</button>
+<button id="btn-stop" disabled>AR停止</button>
+
+<!-- ③ 取得できたデータ -->
+<div class="card">
+    <div class="label">③ カメラ世界座標ポーズ（ARKit SLAMの値）</div>
+    <div class="row"><span>ヨー（左右回転）</span><span id="v-yaw" class="value">-</span></div>
+    <div class="row"><span>ピッチ（上下回転）</span><span id="v-pitch" class="value">-</span></div>
+    <div class="row"><span>ロール（傾き）</span><span id="v-roll" class="value">-</span></div>
+    <div class="row"><span>位置 X / Y / Z</span><span id="v-pos" class="value">-</span></div>
+    <div class="row"><span>フレームレート</span><span id="v-fps" class="value">-</span></div>
+</div>
+
+<div class="card">
+    <div class="label">④ カメラ画像アクセス（AprilTag用）</div>
+    <div class="row"><span>XRWebGLBinding</span><span id="v-binding" class="value">-</span></div>
+    <div class="row"><span>getCameraImage</span><span id="v-camimg" class="value">-</span></div>
+    <div class="row"><span>画像サイズ</span><span id="v-imgsize" class="value">-</span></div>
+</div>
+
+<div id="log">[ログ]</div>
+<canvas id="c"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+let xrSession = null, refSpace = null, gl = null, xrCanvas = null;
+let frameCount = 0, lastFpsTime = performance.now();
+
+function log(msg, cls='') {
+    const d = document.createElement('div');
+    d.style.color = cls==='ok'?'#34d058':cls==='ng'?'#ff6b6b':cls==='mid'?'#ffd700':'#ccc';
+    d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    $('log').prepend(d);
+}
+
+function set(id, text, cls='') {
+    const el=$(id); el.textContent=text;
+    el.className='value '+(cls==='ok'?'ok':cls==='ng'?'ng':cls==='mid'?'mid':'');
+}
+
+// ① 対応チェック
+(async () => {
+    if (!navigator.xr) {
+        set('chk-xr', 'なし ❌', 'ng');
+        set('chk-ar', '-', '');
+        set('chk-cam', '-', '');
+        log('navigator.xr が存在しない。Safari の WebXR が無効か、HTTPSでないか、iOS 15未満の可能性。', 'ng');
+        return;
+    }
+    set('chk-xr', 'あり ✅', 'ok');
+    log('navigator.xr あり', 'ok');
+
+    const arSupported = await navigator.xr.isSessionSupported('immersive-ar').catch(()=>false);
+    if (arSupported) {
+        set('chk-ar', 'サポート ✅', 'ok');
+        log('immersive-ar サポート確認', 'ok');
+        $('btn-start').disabled = false;
+    } else {
+        set('chk-ar', '非サポート ❌', 'ng');
+        log('immersive-ar 非サポート。このデバイス/ブラウザでは AR セッションが使えない。', 'ng');
+    }
+
+    // camera-access は session 開始前には確認不可 → セッション開始後に確認
+    set('chk-cam', 'セッション開始後に確認', 'mid');
+})();
+
+// ② AR セッション開始
+$('btn-start').onclick = async () => {
+    log('AR セッション開始リクエスト中…');
+    try {
+        // canvas を WebGL コンテキストとして使う
+        xrCanvas = $('c');
+        gl = xrCanvas.getContext('webgl', { xrCompatible: true });
+        if (!gl) { log('WebGL コンテキスト取得失敗', 'ng'); return; }
+
+        const sessionInit = {
+            requiredFeatures: ['local'],
+            optionalFeatures: ['camera-access', 'image-tracking']
+        };
+
+        xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit);
+        log('AR セッション開始成功 ✅', 'ok');
+
+        // camera-access が取れたか確認
+        const enabledFeatures = xrSession.enabledFeatures || [];
+        const hasCamAccess = enabledFeatures.includes('camera-access');
+        set('chk-cam', hasCamAccess ? 'あり ✅' : 'なし（optionalなので動作は継続）', hasCamAccess ? 'ok' : 'mid');
+        log('camera-access: ' + (hasCamAccess ? 'あり' : 'なし（オプション機能のため続行）'), hasCamAccess ? 'ok' : 'mid');
+
+        // XRWebGLLayer セットアップ
+        await gl.makeXRCompatible();
+        xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+
+        // 参照空間（local = 起動時の位置が原点）
+        refSpace = await xrSession.requestReferenceSpace('local');
+        log('参照空間 (local) 取得成功', 'ok');
+
+        xrSession.addEventListener('end', () => {
+            log('AR セッション終了');
+            $('btn-start').disabled = false;
+            $('btn-stop').disabled = true;
+            xrSession = null;
+        });
+
+        $('btn-start').disabled = true;
+        $('btn-stop').disabled = false;
+
+        // XRWebGLBinding (camera image 用)
+        let binding = null;
+        try {
+            binding = new XRWebGLBinding(xrSession, gl);
+            set('v-binding', 'XRWebGLBinding 取得成功 ✅', 'ok');
+            log('XRWebGLBinding 取得成功', 'ok');
+        } catch(e) {
+            set('v-binding', '取得失敗: ' + e.message, 'ng');
+            log('XRWebGLBinding 失敗: ' + e.message, 'ng');
+        }
+
+        // フレームループ
+        function onFrame(time, frame) {
+            if (!xrSession) return;
+            xrSession.requestAnimationFrame(onFrame);
+
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsTime >= 1000) {
+                set('v-fps', frameCount + ' fps', frameCount >= 30 ? 'ok' : 'mid');
+                frameCount = 0; lastFpsTime = now;
+            }
+
+            const pose = frame.getViewerPose(refSpace);
+            if (!pose) { log('getViewerPose null', 'mid'); return; }
+
+            const t = pose.transform;
+            // クォータニオンからオイラー角へ
+            const [qx, qy, qz, qw] = [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w];
+            const yaw   = Math.atan2(2*(qw*qy + qz*qx), 1-2*(qy*qy+qz*qz)) * 180/Math.PI;
+            const pitch = Math.asin(Math.max(-1,Math.min(1, 2*(qw*qx - qy*qz)))) * 180/Math.PI;
+            const roll  = Math.atan2(2*(qw*qz + qx*qy), 1-2*(qz*qz+qx*qx)) * 180/Math.PI;
+            const pos   = t.position;
+
+            set('v-yaw',   yaw.toFixed(2)   + '°');
+            set('v-pitch', pitch.toFixed(2) + '°');
+            set('v-roll',  roll.toFixed(2)  + '°');
+            set('v-pos',   `${pos.x.toFixed(3)} / ${pos.y.toFixed(3)} / ${pos.z.toFixed(3)} m`);
+
+            // カメラ画像アクセス試行
+            if (binding) {
+                try {
+                    const view = pose.views[0];
+                    const camTex = binding.getCameraImage(view);
+                    if (camTex) {
+                        set('v-camimg', 'getCameraImage 成功 ✅', 'ok');
+                        set('v-imgsize', `${camTex.width || '?'} × ${camTex.height || '?'}`);
+                        log('getCameraImage 成功！AprilTag統合が可能。', 'ok');
+                        // 一度取れたら毎フレームはログしない
+                        binding._logged = true;
+                        if (binding._logged) binding = { ...binding, getCameraImage: () => null }; // ログ抑制
+                    }
+                } catch(e) {
+                    if (!$('v-camimg').textContent.includes('失敗')) {
+                        set('v-camimg', '失敗: ' + e.message, 'ng');
+                        log('getCameraImage 失敗: ' + e.message + '（カメラ画像は取れないが、ポーズは取れている）', 'mid');
+                    }
+                }
+            }
+        }
+
+        xrSession.requestAnimationFrame(onFrame);
+
+    } catch(e) {
+        log('AR セッション開始失敗: ' + e.message, 'ng');
+        set('chk-ar', '開始失敗: ' + e.message, 'ng');
+    }
+};
+
+$('btn-stop').onclick = () => { if (xrSession) xrSession.end(); };
+</script>
+</body>
+</html>
