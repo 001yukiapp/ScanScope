@@ -115,14 +115,17 @@ const quatToMat=q=>{ const [w,x,y,z]=q; return [
     [2*(x*z-w*y),   2*(y*z+w*x),   1-2*(x*x+y*y)] ]; };
 
 // --- Horn法: 対応点 P(本体) ↔ C(カメラ) から回転 R(本体→カメラ) を解く ---
-function hornPose(P, C){
+// w: オプション重み配列（省略時は等重み）
+function hornPose(P, C, w){
     const n=P.length;
+    let wsum=0; const wt=[];
+    for(let i=0;i<n;i++){ wt.push(w?w[i]:1); wsum+=wt[i]; }
     let pbar=[0,0,0], cbar=[0,0,0];
-    for(let i=0;i<n;i++){ for(let a=0;a<3;a++){ pbar[a]+=P[i][a]; cbar[a]+=C[i][a]; } }
-    pbar=vscale(pbar,1/n); cbar=vscale(cbar,1/n);
+    for(let i=0;i<n;i++){ for(let a=0;a<3;a++){ pbar[a]+=wt[i]*P[i][a]; cbar[a]+=wt[i]*C[i][a]; } }
+    pbar=vscale(pbar,1/wsum); cbar=vscale(cbar,1/wsum);
     const S=[[0,0,0],[0,0,0],[0,0,0]];
     for(let i=0;i<n;i++){ const p=vsub(P[i],pbar), c=vsub(C[i],cbar);
-        for(let a=0;a<3;a++)for(let b=0;b<3;b++) S[a][b]+=p[a]*c[b]; }
+        for(let a=0;a<3;a++)for(let b=0;b<3;b++) S[a][b]+=wt[i]*p[a]*c[b]; }
     const Sxx=S[0][0],Sxy=S[0][1],Sxz=S[0][2],
           Syx=S[1][0],Syy=S[1][1],Syz=S[1][2],
           Szx=S[2][0],Szy=S[2][1],Szz=S[2][2];
@@ -141,8 +144,39 @@ function hornPose(P, C){
         const Rp=[R[0][0]*p[0]+R[0][1]*p[1]+R[0][2]*p[2],
                   R[1][0]*p[0]+R[1][1]*p[1]+R[1][2]*p[2],
                   R[2][0]*p[0]+R[2][1]*p[1]+R[2][2]*p[2]];
-        se+=(Rp[0]-c[0])**2+(Rp[1]-c[1])**2+(Rp[2]-c[2])**2; }
-    return { R, q, rms:Math.sqrt(se/n) };
+        se+=wt[i]*((Rp[0]-c[0])**2+(Rp[1]-c[1])**2+(Rp[2]-c[2])**2); }
+    return { R, q, rms:Math.sqrt(se/wsum) };
+}
+
+// --- 外れ値除去付きHorn（残差median+2.5*MAD超えを除外して再推定）---
+// w: オプション重み配列（入射角cosなど）
+function hornPoseRobust(P, C, w){
+    if(P.length<3) return {...hornPose(P,C,w), outliers:0};
+    const sol0=hornPose(P,C,w);
+    // 重み付き重心でper-point残差を計算
+    const wt=P.map((_,i)=>w?w[i]:1), wsum=wt.reduce((a,b)=>a+b,0);
+    let pbar=[0,0,0], cbar=[0,0,0];
+    for(let i=0;i<P.length;i++) for(let a=0;a<3;a++){ pbar[a]+=wt[i]*P[i][a]; cbar[a]+=wt[i]*C[i][a]; }
+    pbar=vscale(pbar,1/wsum); cbar=vscale(cbar,1/wsum);
+    const R=sol0.R;
+    const res=P.map((Pi,i)=>{
+        const p=vsub(Pi,pbar), c=vsub(C[i],cbar);
+        const Rp=[R[0][0]*p[0]+R[0][1]*p[1]+R[0][2]*p[2],
+                  R[1][0]*p[0]+R[1][1]*p[1]+R[1][2]*p[2],
+                  R[2][0]*p[0]+R[2][1]*p[1]+R[2][2]*p[2]];
+        return Math.sqrt((Rp[0]-c[0])**2+(Rp[1]-c[1])**2+(Rp[2]-c[2])**2);
+    });
+    const srt=[...res].sort((a,b)=>a-b);
+    const med=srt[Math.floor(srt.length/2)];
+    const mad=([...res.map(r=>Math.abs(r-med))].sort((a,b)=>a-b))[Math.floor(res.length/2)]*1.4826;
+    const th=med+2.5*Math.max(mad,5e-4);
+    const mask=res.map(r=>r<=th);
+    const nOut=mask.filter(v=>!v).length;
+    const nKeep=P.length-nOut;
+    if(nOut===0||nKeep<3) return {...sol0, outliers:0};
+    const Pk=P.filter((_,i)=>mask[i]), Ck=C.filter((_,i)=>mask[i]);
+    const wk=w?w.filter((_,i)=>mask[i]):null;
+    return {...hornPose(Pk,Ck,wk), outliers:nOut};
 }
 
 // --- 鏡像（z反転）---
@@ -174,7 +208,7 @@ function buildBody(ids, frames){
     return { pos, placed, failed };
 }
 
-const api={ reconstruct, hornPose, buildBody, chiralityResidual, mirrorPos, jacobiEigen4, quatToMat, solve3, dvec };
+const api={ reconstruct, hornPose, hornPoseRobust, buildBody, chiralityResidual, mirrorPos, jacobiEigen4, quatToMat, solve3, dvec };
 if(typeof module!=='undefined' && module.exports) module.exports=api;
 else root.WMGeom=api;
 

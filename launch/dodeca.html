@@ -6,7 +6,7 @@
     <title>ScanScope 正十二面体モード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.14.0';
+    const _V = 'd0.15.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -41,7 +41,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 正十二面体モード</h1>
-    <p style="color:#555;">d0.14.0</p>
+    <p style="color:#555;">d0.15.0</p>
     <p>前後2個の正十二面体ターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        前ターゲット = ID 0〜10<br>後ターゲット = ID 11〜21<br><br>
        ① 各ターゲットを回してキャリブ<br>
@@ -332,19 +332,24 @@ function finishCalibrate(){
     calibFrames={A:[],B:[]};
 }
 
-// ===== 本体姿勢推定（位置ベース・Horn法）=====
-// 見えているタグ中心(pose.t)を、学習した本体配置Pに剛体整合して姿勢R(本体→カメラ)を得る。
+// ===== 本体姿勢推定（位置ベース・重み付きHorn法＋外れ値除去）=====
+// 重み = タグ入射角のcos（カメラ正面に近いタグほど高重み）
+// hornPoseRobust で残差大タグを自動除外してから再推定。
 // 戻り値 { R, residual(mm), faces, total }
 function fuseBody(g, list){
     const P=model[g].P||{};
-    const bp=[], cp=[];
+    const bp=[], cp=[], ws=[];
     for(const d of list){
         if(!P[d.id]||!d.pose||!d.pose.t) continue;
         bp.push(P[d.id]); cp.push(d.pose.t);
+        // タグz軸のカメラ系z成分 = 入射角のcos（R[2][2]）
+        const R=d.pose.R;
+        ws.push(R ? Math.max(0.1, R[2][2]) : 1);
     }
-    if(bp.length<3) return null;                           // 3点以上で姿勢が定まる
-    const sol=WMGeom.hornPose(bp, cp);
-    return { R:sol.R, residual:sol.rms*1000, faces:bp.length, total:bp.length };
+    if(bp.length<3) return null;
+    const sol=WMGeom.hornPoseRobust(bp, cp, ws);
+    const faces=bp.length-(sol.outliers||0);
+    return { R:sol.R, residual:sol.rms*1000, faces, total:bp.length };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -427,6 +432,28 @@ function stopRecord(){
     };
 }
 
+// ===== 自動確定（σ閾値でカメラ固定不要の自動ログ）=====
+const AUTO_WIN=25, AUTO_SD_TH=0.25;          // 25フレームのσが0.25°以下で確定
+let autoToeHist=[], autoLockout=0;
+
+function tryAutoConfirm(toe){
+    autoToeHist.push(toe); if(autoToeHist.length>AUTO_WIN) autoToeHist.shift();
+    if(autoToeHist.length<AUTO_WIN) return;
+    const now=performance.now(); if(now<autoLockout) return;
+    const mean=autoToeHist.reduce((s,v)=>s+v,0)/AUTO_WIN;
+    const sd=Math.sqrt(autoToeHist.reduce((s,v)=>s+(v-mean)**2,0)/AUTO_WIN);
+    $('s-toe-sd').textContent=`σ${sd.toFixed(2)}°`;
+    if(sd<AUTO_SD_TH){
+        autoLockout=now+4000;                              // 4秒ロックアウト（連続確定防止）
+        const dStr=baseline!=null?` Δ${(mean-baseline>=0?'+':'')}${(mean-baseline).toFixed(2)}°`:'';
+        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定）`);
+        const dEl=$('s-delta'); const prev=dEl.style.color;
+        dEl.style.transition='color 0.2s'; dEl.style.color='#34d058';
+        setTimeout(()=>{ dEl.style.color=prev||''; dEl.style.transition=''; },800);
+        autoToeHist=[];
+    }
+}
+
 // ===== 測定（トー算出）=====
 let measuring=false, measureSamples=[], diagSamples=[];
 function doMeasure(groups){
@@ -445,6 +472,7 @@ function doMeasure(groups){
     if(b) pushBody('B',b.R); else bodyHist.B.length=0;
 
     if(!a||!b){
+        autoToeHist=[];                                    // 片側のみ→自動確定バッファリセット
         // 片側だけ → 単体診断モード（1個のドデカで視点バイアスを直接測る）
         const g=a?'A':(b?'B':null), est=a||b;
         if(est){
@@ -492,11 +520,13 @@ function doMeasure(groups){
     }
     $('lbl-sub1').textContent='絶対トー角＝前後ターゲット本体フレーム間のヨー差・カメラ位置に依存しない';
     $('s-toe').textContent=toe.toFixed(2)+'°';
-    $('lbl-sub2').textContent='ゼロ点 / Horn残差（前A・後B）＝剛体適合誤差（品質指標）';
-    $('s-toe-sd').textContent='';
+    $('lbl-sub2').textContent=`ゼロ点 / Horn残差（前A${a.total>a.faces?` 除${a.total-a.faces}`:''}・後B${b.total>b.faces?` 除${b.total-b.faces}`:''}）`;
+    // s-toe-sd は tryAutoConfirm がσ値で上書きするので初期値のみ設定
+    if(!autoToeHist.length) $('s-toe-sd').textContent='';
     $('s-resid').textContent=`${baseline!=null?baseline.toFixed(2)+'°':'ゼロ未'} / ${a.residual.toFixed(1)}・${b.residual.toFixed(1)}mm`;
 
     pushHist(toe);
+    tryAutoConfirm(toe);
     if(measuring) measureSamples.push(toe);
 }
 
