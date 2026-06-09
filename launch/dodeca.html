@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.7.0';
+    const _V = 'd0.8.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -36,18 +36,26 @@
         .spinner { width:36px; height:36px; border:3px solid #333; border-top-color:#007aff; border-radius:50%; animation:spin .8s linear infinite; }
         @keyframes spin { to { transform:rotate(360deg); } }
         input { width:54px; padding:6px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; text-align:center; }
+        input[type=checkbox] { width:auto; }
+        select { background:#222; color:#fff; border:1px solid #444; border-radius:8px; padding:6px; font-size:13px; }
     </style>
 </head>
 <body>
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.7.0</p>
+    <p style="color:#555;">d0.8.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       前ターゲット = ID 1〜7<br>後ターゲット = ID 11〜17<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
        ③ 調整後に測定 → Δが変化量</p>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <label style="color:#888;font-size:13px;">ターゲット</label>
+        <select id="modeSelect">
+            <option value="facet">ファセットボス（前1〜7/後11〜17）</option>
+            <option value="diag">ドデカ診断（ID2〜12・単体）</option>
+        </select>
+    </div>
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">タグサイズ</label>
         <input id="tagSizeInput" type="number" value="36" min="5" max="200">
@@ -65,6 +73,14 @@
     <div id="panel">
         <div class="row"><span class="lbl" id="lbl-mode">モード</span><span class="val" id="s-status">-</span></div>
         <div id="group-rows"></div>
+        <div class="row" style="margin-top:2px;">
+            <span class="lbl" style="font-size:10px;">診断SW（切替でブレ履歴リセット）</span>
+            <span style="font-size:11px;display:flex;gap:10px;color:#ccc;">
+                <label><input type="checkbox" id="swOutlier" checked>除去</label>
+                <label><input type="checkbox" id="swWeight" checked>重み</label>
+                <label><input type="checkbox" id="swMin5" checked>5面</label>
+            </span>
+        </div>
         <div style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
             <div class="row">
                 <span class="lbl" id="lbl-main" style="max-width:55%;line-height:1.3;">-</span>
@@ -115,12 +131,21 @@ const offCtx = offscreen.getContext('2d', { willReadFrequently:true });
 let detector = null;
 let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 
-// ===== グループ定義（ファセットボス7面×2ターゲット）=====
-// 将来4ターゲット対応時はここにC/D行を追加するだけ
-const GROUPS = [
-    { key:'A', label:'前', idMin:1,  idMax:7  },
-    { key:'B', label:'後', idMin:11, idMax:17 },
-];
+// ===== グループ定義（モード別）=====
+// facet: ファセットボス7面×2ターゲット（将来4ターゲット時はC/D行を追加）
+// diag:  物理ドデカ単体（一番上=12・第一リング2〜6・第二リング7〜11）。
+//        Bはダミー範囲（タグなし）→ 常に単体診断モードになる。
+//        学習モデルはモード別キーに保存（互いに上書きしない）。
+const MODES = {
+    facet: { groups:[ { key:'A', label:'前', idMin:1,  idMax:7  },
+                      { key:'B', label:'後', idMin:11, idMax:17 } ],
+             modelKey:'scanscope_dodeca_model' },
+    diag:  { groups:[ { key:'A', label:'ドデカ', idMin:2,  idMax:12 },
+                      { key:'B', label:'未使用', idMin:98, idMax:99 } ],
+             modelKey:'scanscope_diag_model' },
+};
+let mode = 'facet';
+let GROUPS = MODES[mode].groups;
 function groupOf(id){
     const g=GROUPS.find(g=>id>=g.idMin&&id<=g.idMax);
     return g?g.key:null;
@@ -139,13 +164,22 @@ function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_d
 function emptyModel(){ return Object.fromEntries(GROUPS.map(g=>[g.key,{P:{}}])); }
 function loadModel() {
     try {
-        const s = localStorage.getItem('scanscope_dodeca_model');
+        const s = localStorage.getItem(MODES[mode].modelKey);
         if (s) return JSON.parse(s);
     } catch(e) {}
     return emptyModel();
 }
 function saveModel() {
-    localStorage.setItem('scanscope_dodeca_model', JSON.stringify(model));
+    localStorage.setItem(MODES[mode].modelKey, JSON.stringify(model));
+}
+
+// モード切替（カメラ起動前のみ。タグサイズ登録がGROUPS範囲依存のため）
+function applyMode(m){
+    mode = m;
+    GROUPS = MODES[mode].groups;
+    model = loadModel();
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
+    renderGroupRows();
 }
 
 // ===== 行列・クォータニオン ユーティリティ（R は行優先 3x3）=====
@@ -340,25 +374,28 @@ function finishCalibrate(){
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; });
 }
 
-// ===== 本体姿勢推定（位置ベース・重み付きHorn法＋外れ値除去）=====
-// 重み = sqrt(tagPx)：画像上のタグサイズ（Flip曖昧性に依存しない）
-// 近い・正面寄りのタグほど大きく映り高品質 → 高重み。
-// hornPoseRobust で残差大タグを自動除外してから再推定。
-// 最低5面必要（4面以下では外れ値1枚で解が崩壊するため）。
+// ===== 本体姿勢推定（位置ベースHorn法・診断スイッチ付き）=====
+// 診断SW（0.28°→0.71°悪化の原因切り分け用。全OFF＝d0.11.0と同条件）:
+//   除去: hornPoseRobust(MAD外れ値除去)＋残差8mm超の棄却 / OFF=素のhornPose
+//   重み: sqrt(tagPx)（Flip曖昧性に依存しない） / OFF=等重み
+//   5面: 最低5面 / OFF=最低3面
 // 戻り値 { R, residual(mm), faces, total }
+function diagCfg(){ return { outlier:$('swOutlier').checked, weight:$('swWeight').checked, min5:$('swMin5').checked }; }
+function diagCfgStr(){ const c=diagCfg(); return `[除${c.outlier?'ON':'OFF'} 重${c.weight?'ON':'OFF'} ${c.min5?5:3}面]`; }
 function fuseBody(g, list){
+    const cfg=diagCfg();
     const P=model[g].P||{};
     const bp=[], cp=[], ws=[];
     for(const d of list){
         if(!P[d.id]||!d.pose||!d.pose.t) continue;
         bp.push(P[d.id]); cp.push(d.pose.t);
-        ws.push(Math.sqrt(tagPx(d)));
+        ws.push(cfg.weight?Math.sqrt(tagPx(d)):1);
     }
-    if(bp.length<5) return null;
-    const sol=WMGeom.hornPoseRobust(bp, cp, ws);
+    if(bp.length<(cfg.min5?5:3)) return null;
+    const sol=cfg.outlier?WMGeom.hornPoseRobust(bp, cp, ws):WMGeom.hornPose(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
-    if(residual>8) return null;                            // 残差8mm超は品質不足で棄却
+    if(cfg.outlier&&residual>8) return null;               // 残差8mm超は品質不足で棄却
     return { R:sol.R, residual, faces, total:bp.length };
 }
 
@@ -394,10 +431,10 @@ function startRecord(){
         if(d.mode==='single'){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
-            recordLog.push(`[+${el}s] 単体診断 | 見えてる面:${d.faces} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
+            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
-            recordLog.push(`[+${el}s] トー測定 | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}`);
+            recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}`);
         }
     },500);
 }
@@ -575,7 +612,7 @@ function drawGraph(){
 // ===== 描画 =====
 function drawTag(d){
     const c=d.corners, g=groupOf(d.id);
-    const learned = (model[g].P||{})[d.id];
+    const learned = g && ((model[g]||{}).P||{})[d.id];
     ctx.strokeStyle = learned ? '#34d058' : '#ff9500';  // 学習済=緑, 未学習=橙
     ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
     for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
@@ -639,15 +676,26 @@ function setZero(){
 function addLog(msg){ const e=document.createElement('div'); e.className='entry'; e.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(e); }
 
 // ===== ボタン =====
-// グループ行をGROUPSから動的生成
-(()=>{
-    const c=$('group-rows');
+// グループ行をGROUPSから動的生成（モード切替時も再描画）
+function renderGroupRows(){
+    const c=$('group-rows'); c.innerHTML='';
     GROUPS.forEach(g=>{
         const d=document.createElement('div'); d.className='row';
         d.innerHTML=`<span class="lbl">${g.label}(${g.key}) ID${g.idMin}〜${g.idMax} 見えてる/学習済み</span><span class="val" id="s-${g.key}">-</span>`;
         c.appendChild(d);
     });
-})();
+}
+renderGroupRows();
+
+$('modeSelect').onchange=e=>applyMode(e.target.value);
+// 診断SW切替: 設定をまたいだブレが混ざらないよう姿勢ヒストリをリセット
+['swOutlier','swWeight','swMin5'].forEach(id=>{
+    $(id).onchange=()=>{
+        GROUPS.forEach(g=>{ bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
+        autoToeHist=[]; hist.length=0;
+        addLog(`診断SW変更 ${diagCfgStr()}（ブレ履歴リセット）`);
+    };
+});
 
 $('startBtn').onclick=()=>init();
 $('calibBtn').onclick=()=>{
