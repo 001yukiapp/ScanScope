@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.4';
+    const _V = 'd0.10.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.9.4</p>
+    <p style="color:#555;">d0.10.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -186,7 +186,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; });
     renderGroupRows();
 }
 
@@ -445,6 +445,57 @@ function finishCalibrate(){
 function diagCfg(){ return { outlier:$('swOutlier').checked, weight:$('swWeight').checked, min5:$('swMin5').checked, pnp:$('swPnp').checked }; }
 function diagCfgStr(){ const c=diagCfg(); return `[除${c.outlier?'ON':'OFF'} 重${c.weight?'ON':'OFF'} ${c.min5?5:3}面 P${c.pnp?'ON':'OFF'}]`; }
 
+// ===== タグ向きのオンライン自動学習 =====
+// キャリブ中の回転フレーム（モーションブラー入り）はタグ向き候補の質が悪い
+// （実測: 学習Qのコーナー予測が74pxズレ）。静止して眺めている測定中のフレームから
+// 常時収集し、60良フレームごとにQを再推定する。操作は「数方向から各5秒眺める」だけ。
+const qAcc=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
+let qGoodFrames=0;
+function collectQ(g, dets, R, residual){
+    if(calibrating) return;
+    if(dets.length<4 || residual>5) return;                // 本体姿勢が信頼できるフレームのみ
+    const P=model[g].P||{}; const pids=Object.keys(P);
+    if(pids.length<3) return;
+    const cen=[0,0,0];
+    for(const id of pids) for(let a=0;a<3;a++) cen[a]+=P[id][a]/pids.length;
+    const RbcT=matT(R);
+    for(const d of dets){
+        if(!P[d.id]||!d.pose||!d.pose.R) continue;
+        const acc=qAcc[g][d.id]=qAcc[g][d.id]||{Rs:[],ws:[]};
+        const out=[P[d.id][0]-cen[0], P[d.id][1]-cen[1], P[d.id][2]-cen[2]];
+        const on=Math.hypot(out[0],out[1],out[2])||1;
+        const cands=[d.pose.R];
+        if(d.pose.asol&&d.pose.asol.R) cands.push(d.pose.asol.R);
+        for(const Rtc of cands){
+            const Rtb=WMGeom.matMul3(RbcT,Rtc);
+            const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
+            acc.Rs.push(Rtb); acc.ws.push(Math.max(0.05,dot));
+            if(acc.Rs.length>120){ acc.Rs.shift(); acc.ws.shift(); }
+        }
+    }
+    if(++qGoodFrames>=60){ qGoodFrames=0; refreshQ(g); }   // 約10秒ごとに再推定
+}
+function refreshQ(g){
+    const Q=model[g].Q||{}, Qs=model[g].Qs||{};
+    let changed=0;
+    for(const id of Object.keys(qAcc[g])){
+        const acc=qAcc[g][id];
+        if(acc.Rs.length<20) continue;
+        const pick=WMGeom.pickStableRotation(acc.Rs, 25, acc.ws);
+        if(!pick||pick.support<0.4) continue;
+        const close=acc.Rs.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<10);
+        const newQ=close.length>=8 ? WMGeom.avgRotGS(close) : pick.R;
+        if(!Q[id] || WMGeom.rotAngleDeg(Q[id],newQ)>1 || (Qs[id]||0)<pick.support-0.05){
+            Q[id]=newQ; changed++;
+        }
+        Qs[id]=+pick.support.toFixed(2);
+    }
+    if(changed){
+        model[g].Q=Q; model[g].Qs=Qs; saveModel();
+        addLog(`向き自動学習: ${Object.keys(Q).length}面（更新${changed}・静止視聴で精度向上）`);
+    }
+}
+
 const TAG_LOCAL=h=>[[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
 function projPt(R,t,X){
     const Y=WMGeom.matVec3(R,X), z=Y[2]+t[2];
@@ -482,6 +533,7 @@ function fuseBody(g, list){
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
     if(cfg.outlier&&residual>8) return null;               // 残差8mm超は品質不足で棄却
+    collectQ(g, dets, sol.R, residual);                    // タグ向きのオンライン学習（静止フレームから）
     let R=sol.R, method='中心', pnpRms=null, pnpFail=null;
 
     if(cfg.pnp){
@@ -889,7 +941,7 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
 $('recordBtn').textContent='記録開始';
-$('resetBtn').onclick=()=>{ model=emptyModel(); saveModel(); addLog('学習モデルを消去しました'); };
+$('resetBtn').onclick=()=>{ model=emptyModel(); saveModel(); GROUPS.forEach(g=>{ qAcc[g.key]={}; }); addLog('学習モデルを消去しました'); };
 </script>
 </body>
 </html>
