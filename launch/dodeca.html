@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.8.1';
+    const _V = 'd0.9.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.8.1</p>
+    <p style="color:#555;">d0.9.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -59,7 +59,7 @@
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">タグサイズ</label>
         <input id="tagSizeInput" type="number" value="36" min="5" max="200">
-        <span style="color:#888;font-size:13px;">mm</span>
+        <span style="color:#888;font-size:13px;">mm（ドデカ診断用。ファセットボスは側面55/上面80mm固定・上面=ID1/11）</span>
     </div>
     <button id="startBtn">カメラ起動</button>
 </div>
@@ -76,9 +76,10 @@
         <div class="row" style="margin-top:2px;">
             <span class="lbl" style="font-size:10px;">診断SW（切替でブレ履歴リセット）</span>
             <span style="font-size:11px;display:flex;gap:10px;color:#ccc;">
-                <label><input type="checkbox" id="swOutlier" checked>除去</label>
+                <label><input type="checkbox" id="swOutlier">除去</label>
                 <label><input type="checkbox" id="swWeight" checked>重み</label>
-                <label><input type="checkbox" id="swMin5" checked>5面</label>
+                <label><input type="checkbox" id="swMin5">5面</label>
+                <label><input type="checkbox" id="swPnp" checked>PnP</label>
             </span>
         </div>
         <div style="border-top:1px solid #333;margin-top:4px;padding-top:6px;">
@@ -137,13 +138,20 @@ let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 //        Bはダミー範囲（タグなし）→ 常に単体診断モードになる。
 //        学習モデルはモード別キーに保存（互いに上書きしない）。
 const MODES = {
-    facet: { groups:[ { key:'A', label:'前', idMin:1,  idMax:7  },
-                      { key:'B', label:'後', idMin:11, idMax:17 } ],
+    // facetのタグサイズ: 側面55mm・上面80mm（上面=各ターゲットの先頭ID: 前=1・後=11 と取り決め）
+    facet: { groups:[ { key:'A', label:'前', idMin:1,  idMax:7,  size:55, sizeById:{1:80}  },
+                      { key:'B', label:'後', idMin:11, idMax:17, size:55, sizeById:{11:80} } ],
              modelKey:'scanscope_dodeca_model' },
     diag:  { groups:[ { key:'A', label:'ドデカ', idMin:2,  idMax:12 },
                       { key:'B', label:'未使用', idMin:98, idMax:99 } ],
              modelKey:'scanscope_diag_model' },
 };
+// タグの一辺（メートル）。diagは入力値、facetはGROUPS定義
+function tagSizeM(id){
+    if(mode==='diag') return (parseFloat($('tagSizeInput').value)||36)/1000;
+    const g=GROUPS.find(g=>id>=g.idMin&&id<=g.idMax);
+    return (((g&&g.sizeById&&g.sizeById[id])||(g&&g.size))||36)/1000;
+}
 let mode = 'facet';
 let GROUPS = MODES[mode].groups;
 function groupOf(id){
@@ -178,7 +186,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
     renderGroupRows();
 }
 
@@ -294,8 +302,7 @@ async function startCamera(){
     await new Promise(r=>{video.onloadedmetadata=r;});
     overlay.width=video.videoWidth; overlay.height=video.videoHeight;
     detector.set_camera_info(1243,1243,video.videoWidth/2,video.videoHeight/2);
-    const sz=(parseFloat($('tagSizeInput').value)||40)/1000;
-    GROUPS.forEach(g=>{ for(let i=g.idMin;i<=g.idMax;i++) detector.set_tag_size(i,sz); });
+    GROUPS.forEach(g=>{ for(let i=g.idMin;i<=g.idMax;i++) detector.set_tag_size(i,tagSizeM(i)); });
     $('loading').style.display='none';
     $('main').style.display='block';
     requestAnimationFrame(loop);
@@ -334,16 +341,26 @@ function process(){
     doMeasure(groups);
 }
 
-// ===== キャリブレーション（位置ベース）=====
+// ===== キャリブレーション（位置ベース＋タグ向き学習）=====
 // 各フレームで見えたタグ中心(pose.t, メートル)を記録 → 中心間距離で3D配置を復元。
-// 傾き(tilt)を一切使わないため、ポーズ反転(flip)曖昧性の影響を受けない。
+// 傾き(tilt)は配置復元には使わない（flip無関係）。
+// タグ向き(Q)はコーナーPnP用に別途学習: 候補(R+asol)を集めて最大クラスタで確定（flip解は少数派に落ちる）。
 let calibFrames = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
+let calibRots   = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
 function doCalibrate(groups){
     for(const g of GROUPS.map(g=>g.key)){
         const list=groups[g].filter(d=>d.pose&&d.pose.t);
         if(list.length<2) continue;                        // 距離を測るには2面以上
-        const fr={}; for(const d of list) fr[d.id]=d.pose.t;
+        const fr={}, rr={};
+        for(const d of list){
+            fr[d.id]=d.pose.t;
+            const cands=[];
+            if(d.pose.R) cands.push(d.pose.R);
+            if(d.pose.asol&&d.pose.asol.R) cands.push(d.pose.asol.R);
+            rr[d.id]=cands;
+        }
         calibFrames[g].push(fr);
+        calibRots[g].push(rr);
     }
 }
 
@@ -367,36 +384,117 @@ function finishCalibrate(){
             const P=fids.map(id=>pos[id]), C=fids.map(id=>fr[id]);
             rmss.push(WMGeom.hornPose(P,C).rms*1000); }
         rmss.sort((a,b)=>a-b); const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
-        msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm${failed.length?` 欠${failed.length}`:''}`);
+        // タグ向き学習: R_tag_body = R_body_cam^T · R_tag_cam を全フレームから集め、
+        // 凸形状の事前知識（タグ法線は本体重心から外向き）で重み付けして最大クラスタで確定。
+        // flip解は法線が外向きから2×入射角ずれるため重みが落ち、クラスタのタイでも負ける。
+        const rotFrames=calibRots[g]||[];
+        const rotCands={}, rotWts={};
+        const cen=[0,0,0]; const pids=Object.keys(pos);
+        for(const id of pids) for(let a=0;a<3;a++) cen[a]+=pos[id][a]/pids.length;
+        for(let fi=0;fi<frames.length;fi++){
+            const fr=frames[fi], rr=rotFrames[fi]||{};
+            const fids=Object.keys(fr).filter(id=>pos[id]);
+            if(fids.length<3) continue;
+            const bodySol=WMGeom.hornPose(fids.map(id=>pos[id]), fids.map(id=>fr[id]));
+            const RbcT=matT(bodySol.R);
+            for(const id of fids){
+                const out=[pos[id][0]-cen[0], pos[id][1]-cen[1], pos[id][2]-cen[2]];
+                const on=Math.hypot(out[0],out[1],out[2])||1;
+                for(const Rtc of (rr[id]||[])){
+                    const Rtb=WMGeom.matMul3(RbcT,Rtc);
+                    const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;  // 法線の外向き度
+                    (rotCands[id]=rotCands[id]||[]).push(Rtb);
+                    (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot));   // 外向きの緩い事前重み（flipは視線反射で散るのが主防御）
+                }
+            }
+        }
+        const Q={};
+        for(const id of pids){
+            const pick=WMGeom.pickStableRotation(rotCands[id]||[], 15, rotWts[id]);
+            if(pick && pick.support>=0.5) Q[id]=pick.R;    // 重み付き支持率50%未満は信頼しない（PnP対象外）
+        }
+        model[g].Q=Q;
+        msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面${failed.length?` 欠${failed.length}`:''}`);
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; });
 }
 
-// ===== 本体姿勢推定（位置ベースHorn法・診断スイッチ付き）=====
-// 診断SW（0.28°→0.71°悪化の原因切り分け用。全OFF＝d0.11.0と同条件）:
+// ===== 本体姿勢推定（位置ベースHorn初期化 → コーナー再投影PnP）=====
+// 診断SW:
 //   除去: hornPoseRobust(MAD外れ値除去)＋残差8mm超の棄却 / OFF=素のhornPose
 //   重み: sqrt(tagPx)（Flip曖昧性に依存しない） / OFF=等重み
 //   5面: 最低5面 / OFF=最低3面
-// 戻り値 { R, residual(mm), faces, total }
-function diagCfg(){ return { outlier:$('swOutlier').checked, weight:$('swWeight').checked, min5:$('swMin5').checked }; }
-function diagCfgStr(){ const c=diagCfg(); return `[除${c.outlier?'ON':'OFF'} 重${c.weight?'ON':'OFF'} ${c.min5?5:3}面]`; }
+//   PnP: タグ4隅の再投影Gauss-Newtonで姿勢を微調整（要・向き学習済みキャリブ）。
+//        中心位置の奥行きバイアス（視点バイアスの主因）を回避する本命経路。
+// 戻り値 { R, residual(mm), faces, total, method, pnpRms(px|null) }
+function diagCfg(){ return { outlier:$('swOutlier').checked, weight:$('swWeight').checked, min5:$('swMin5').checked, pnp:$('swPnp').checked }; }
+function diagCfgStr(){ const c=diagCfg(); return `[除${c.outlier?'ON':'OFF'} 重${c.weight?'ON':'OFF'} ${c.min5?5:3}面 P${c.pnp?'ON':'OFF'}]`; }
+
+const TAG_LOCAL=h=>[[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+function projPt(R,t,X){
+    const Y=WMGeom.matVec3(R,X), z=Y[2]+t[2];
+    return [1243*(Y[0]+t[0])/z+overlay.width/2, 1243*(Y[1]+t[1])/z+overlay.height/2];
+}
+// 観測コーナー順の解決: 予測投影と最も合う巡回シフト（順/逆×4巡回）を選ぶ
+function resolveCornerOrder(Xc, obs, R, t){
+    const pred=Xc.map(x=>projPt(R,t,x));
+    let best=null;
+    for(let rev=0;rev<2;rev++){
+        const o=rev?[...obs].reverse():obs;
+        for(let s=0;s<4;s++){
+            let e=0;
+            for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); }
+            if(!best||e<best.e) best={e, arr:[0,1,2,3].map(k=>o[(k+s)%4])};
+        }
+    }
+    return best.e/4<40 ? best.arr : null;                  // 平均40px超は対応付け失敗
+}
+
 function fuseBody(g, list){
     const cfg=diagCfg();
-    const P=model[g].P||{};
-    const bp=[], cp=[], ws=[];
+    const P=model[g].P||{}, Q=model[g].Q||{};
+    const bp=[], cp=[], ws=[], dets=[];
     for(const d of list){
         if(!P[d.id]||!d.pose||!d.pose.t) continue;
         bp.push(P[d.id]); cp.push(d.pose.t);
         ws.push(cfg.weight?Math.sqrt(tagPx(d)):1);
+        dets.push(d);
     }
     if(bp.length<(cfg.min5?5:3)) return null;
     const sol=cfg.outlier?WMGeom.hornPoseRobust(bp, cp, ws):WMGeom.hornPose(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
     if(cfg.outlier&&residual>8) return null;               // 残差8mm超は品質不足で棄却
-    return { R:sol.R, residual, faces, total:bp.length };
+    let R=sol.R, method='中心', pnpRms=null;
+
+    if(cfg.pnp){
+        // 初期並進: 重み付き重心から
+        let pb=[0,0,0], cb=[0,0,0], wsum=0;
+        for(let i=0;i<bp.length;i++){ wsum+=ws[i]; for(let a=0;a<3;a++){ pb[a]+=ws[i]*bp[i][a]; cb[a]+=ws[i]*cp[i][a]; } }
+        for(let a=0;a<3;a++){ pb[a]/=wsum; cb[a]/=wsum; }
+        const Rp=WMGeom.matVec3(R,pb);
+        const t0=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
+        const X=[], uv=[];
+        for(const d of dets){
+            if(!Q[d.id]) continue;                          // 向き未学習タグはPnP対象外
+            const hh=tagSizeM(d.id)/2;
+            const Xc=TAG_LOCAL(hh).map(l=>{
+                const v=WMGeom.matVec3(Q[d.id],l);
+                return [P[d.id][0]+v[0], P[d.id][1]+v[1], P[d.id][2]+v[2]];
+            });
+            const obs=d.corners.map(c=>[c.x,c.y]);
+            const ord=resolveCornerOrder(Xc, obs, R, t0);
+            if(!ord) continue;
+            for(let k=0;k<4;k++){ X.push(Xc[k]); uv.push(ord[k]); }
+        }
+        if(X.length>=8){                                    // 2タグ(8点)以上でPnP実行
+            const ref=WMGeom.pnpRefine(X, uv, {fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2}, R, t0, 10);
+            if(ref && ref.rmsPx<6){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${X.length/4}`; }
+        }
+    }
+    return { R, residual, faces, total:bp.length, method, pnpRms };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -431,7 +529,8 @@ function startRecord(){
         if(d.mode==='single'){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
-            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
+            const pn=d.pnpRms!=null?` ${d.method}:${d.pnpRms.toFixed(1)}px`:` ${d.method||''}`;
+            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
             recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}`);
@@ -529,15 +628,15 @@ function doMeasure(groups){
         if(est){
             const st=bodyStability(g);
             const viewDiff = refPose ? angBetween(refPose, est.R) : null;
-            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff};
+            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms};
             if(viewDiff!=null){
                 $('lbl-main').textContent='視点差分＝カメラ角度を変えたときの本体姿勢ずれ（1°未満=バイアスなし）';
                 $('s-delta').textContent=`${viewDiff.toFixed(2)}°`;
                 $('s-delta').className=viewDiff<1?'val good':viewDiff<3?'val mid':'val bad';
             } else {
                 $('lbl-main').textContent='単体診断モード｜視点ロックで視点バイアスを数値検証できます';
-                $('s-delta').textContent=`${est.faces}面PnP`;
-                $('s-delta').className=est.faces>=3?'val good':'val mid';
+                $('s-delta').textContent=`${est.faces}面 ${est.method}${est.pnpRms!=null?` ${est.pnpRms.toFixed(1)}px`:''}`;
+                $('s-delta').className=est.method&&est.method.startsWith('PnP')?'val good':'val mid';
             }
             $('lbl-sub1').textContent='Horn残差＝タグ中心→剛体モデルの適合誤差（小さいほど検出品質◎ 目安<5mm）';
             $('s-toe').textContent=`${est.residual.toFixed(1)} mm`;
@@ -689,7 +788,7 @@ renderGroupRows();
 
 $('modeSelect').onchange=e=>applyMode(e.target.value);
 // 診断SW切替: 設定をまたいだブレが混ざらないよう姿勢ヒストリをリセット
-['swOutlier','swWeight','swMin5'].forEach(id=>{
+['swOutlier','swWeight','swMin5','swPnp'].forEach(id=>{
     $(id).onchange=()=>{
         GROUPS.forEach(g=>{ bodyHist[g.key].length=0; noTargetFrames[g.key]=0; });
         autoToeHist=[]; hist.length=0;
@@ -700,7 +799,7 @@ $('modeSelect').onchange=e=>applyMode(e.target.value);
 $('startBtn').onclick=()=>init();
 $('calibBtn').onclick=()=>{
     if(!calibrating){
-        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; });
+        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; });
         $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
         addLog('キャリブ開始: A・Bを順に回して全面を見せる');
     } else finishCalibrate();
