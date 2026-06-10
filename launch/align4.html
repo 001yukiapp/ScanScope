@@ -336,7 +336,7 @@ function localizeCamera(visibleFloor) {
 function estimateWheelPose(wheelDets, cameraPose) {
     if (!bodyModel) return null;
     const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
-    if (valid.length < 3) return null;
+    if (valid.length < 4) return null;                 // 視点バイアス実測より3面は絶対測定に不適（12〜15°）
     const P = valid.map(d => bodyModel[String(d.id)]);
     const C = valid.map(d => d.pose.t);
     const sol = WMGeom.hornPose(P, C);
