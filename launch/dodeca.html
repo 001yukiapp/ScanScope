@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.3';
+    const _V = 'd0.9.4';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.9.3</p>
+    <p style="color:#555;">d0.9.4</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -451,6 +451,7 @@ function projPt(R,t,X){
     return [1243*(Y[0]+t[0])/z+overlay.width/2, 1243*(Y[1]+t[1])/z+overlay.height/2];
 }
 // 観測コーナー順の解決: 予測投影と最も合う巡回シフト（順/逆×4巡回）を選ぶ
+// 戻り { arr, avg(px), ok }  okがfalseでもavgは診断用に返す
 function resolveCornerOrder(Xc, obs, R, t){
     const pred=Xc.map(x=>projPt(R,t,x));
     let best=null;
@@ -462,7 +463,8 @@ function resolveCornerOrder(Xc, obs, R, t){
             if(!best||e<best.e) best={e, arr:[0,1,2,3].map(k=>o[(k+s)%4])};
         }
     }
-    return best.e/4<40 ? best.arr : null;                  // 平均40px超は対応付け失敗
+    const avg=best.e/4;
+    return { arr:best.arr, avg, ok:avg<40 };               // 平均40px超は対応付け失敗
 }
 
 function fuseBody(g, list){
@@ -491,9 +493,11 @@ function fuseBody(g, list){
         const t0=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
         const Qs=model[g].Qs||{};
         const tags=[];
+        let qVis=0, ordErrSum=0, ordErrN=0;                 // PnP前段の診断カウンタ
         for(const d of dets){
             if(!Q[d.id]) continue;                          // 向き未学習タグはPnP対象外
             if(Qs[d.id]!=null && Qs[d.id]<0.25) continue;   // 低支持率の向きは使わない
+            qVis++;
             const hh=tagSizeM(d.id)/2;
             const Xc=TAG_LOCAL(hh).map(l=>{
                 const v=WMGeom.matVec3(Q[d.id],l);
@@ -501,8 +505,8 @@ function fuseBody(g, list){
             });
             const obs=d.corners.map(c=>[c.x,c.y]);
             const ord=resolveCornerOrder(Xc, obs, R, t0);
-            if(!ord) continue;
-            tags.push({Xc, uv:ord});
+            if(!ord.ok){ ordErrSum+=ord.avg; ordErrN++; continue; }
+            tags.push({Xc, uv:ord.arr});
         }
         const K={fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2};
         const runPnp=arr=>{
@@ -531,6 +535,10 @@ function fuseBody(g, list){
             // 受け入れ: 15px未満（レンズ歪み未補正のため合成テスト基準より緩め）
             if(ref.rmsPx<15){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
             else pnpFail=ref.rmsPx;                          // 棄却理由を可視化
+        }
+        // PnPが走らなかった場合の理由を表示（Q=向きあり可視タグ / 順=対応付け成功）
+        if(method==='中心' && pnpFail==null){
+            method=`中心 Q${qVis}/順${tags.length}${ordErrN?`(ズレ${(ordErrSum/ordErrN).toFixed(0)}px)`:''}`;
         }
     }
     return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail };
