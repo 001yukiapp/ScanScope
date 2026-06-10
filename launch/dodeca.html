@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.10.0';
+    const _V = 'd0.10.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.10.0</p>
+    <p style="color:#555;">d0.10.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -558,7 +558,7 @@ function fuseBody(g, list){
             const obs=d.corners.map(c=>[c.x,c.y]);
             const ord=resolveCornerOrder(Xc, obs, R, t0);
             if(!ord.ok){ ordErrSum+=ord.avg; ordErrN++; continue; }
-            tags.push({Xc, uv:ord.arr});
+            tags.push({id:d.id, Xc, uv:ord.arr});
         }
         const K={fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2};
         const runPnp=arr=>{
@@ -566,27 +566,39 @@ function fuseBody(g, list){
             for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
             return X.length>=8 ? WMGeom.pnpRefine(X,uv,K,R,t0,10) : null;
         };
-        let ref=runPnp(tags), used=tags.length;
+        const perTagRms=(arr,rf)=>arr.map(tg=>{
+            let s=0;
+            for(let k=0;k<4;k++){
+                const Y=WMGeom.matVec3(rf.R,tg.Xc[k]), z=Y[2]+rf.t[2];
+                const u=K.fx*(Y[0]+rf.t[0])/z+K.cx, v=K.fy*(Y[1]+rf.t[1])/z+K.cy;
+                s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
+            }
+            return Math.sqrt(s/4);
+        });
+        let ref=runPnp(tags), used=tags.length, keepTags=tags;
         if(ref){
-            // タグ単位のロバスト除去: per-tag残差が中央値の2.5倍超のタグを外して再推定
-            const perTag=tags.map(tg=>{
-                let s=0;
-                for(let k=0;k<4;k++){
-                    const Y=WMGeom.matVec3(ref.R,tg.Xc[k]), z=Y[2]+ref.t[2];
-                    const u=K.fx*(Y[0]+ref.t[0])/z+K.cx, v=K.fy*(Y[1]+ref.t[1])/z+K.cy;
-                    s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
-                }
-                return Math.sqrt(s/4);
-            });
-            const med=[...perTag].sort((a,b)=>a-b)[Math.floor(perTag.length/2)];
-            const keep=tags.filter((_,i)=>perTag[i]<=Math.max(2.5*med,4));
-            if(keep.length<tags.length && keep.length>=2){
+            // タグ単位のロバスト除去（最大2周・下側中央値で悪玉を確実に弾く）
+            for(let round=0; round<2; round++){
+                const pt=perTagRms(keepTags, ref);
+                const med=[...pt].sort((a,b)=>a-b)[Math.floor((pt.length-1)/2)];
+                const keep=keepTags.filter((_,i)=>pt[i]<=Math.max(2.5*med,4));
+                if(keep.length===keepTags.length || keep.length<2) break;
                 const r2=runPnp(keep);
-                if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; }
+                if(!r2 || r2.rmsPx>=ref.rmsPx) break;
+                ref=r2; keepTags=keep; used=keep.length;
             }
             // 受け入れ: 15px未満（レンズ歪み未補正のため合成テスト基準より緩め）
             if(ref.rmsPx<15){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
-            else pnpFail=ref.rmsPx;                          // 棄却理由を可視化
+            else {
+                pnpFail=ref.rmsPx;                           // 棄却理由を可視化
+                // タグ別内訳を5秒に1回ログ（どのタグの向きが悪いか特定用）
+                const now=performance.now();
+                if(!window._pnpLogT || now-window._pnpLogT>5000){
+                    window._pnpLogT=now;
+                    const pt=perTagRms(keepTags, ref);
+                    addLog(`PnP棄却${ref.rmsPx.toFixed(0)}px 内訳: ${keepTags.map((t,i)=>`id${t.id}:${pt[i].toFixed(0)}px`).join(' ')}`);
+                }
+            }
         }
         // PnPが走らなかった場合の理由を表示（Q=向きあり可視タグ / 順=対応付け成功）
         if(method==='中心' && pnpFail==null){
