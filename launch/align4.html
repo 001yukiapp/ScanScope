@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>ScanScope 4輪アライメント</title>
     <script>
-    const _V = 'a0.1.0';
+    const _V = 'a0.2.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -56,7 +56,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.1.0</p>
+    <p style="color:#555;">a0.2.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -66,8 +66,9 @@
     </div>
     <div class="badge">
         <b>床タグモード（オプション）</b><br>
-        ID 44〜47 のタグをカメラに見せると世界座標で測定します（精度向上）。<br>
-        floor_sheet.html をPCに表示して床に置いてください。
+        ID 44〜47 のタグ（iPad表示・黒部89mm）を床に適当に置き、<br>
+        「床キャリブ」ボタンでマップを自動学習します（<b>定規不要</b>）。<br>
+        学習後は世界座標で測定します（カメラを動かしてもOK）。
     </div>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <label style="color:#888;font-size:13px;">タグサイズ</label>
@@ -117,9 +118,11 @@
     </div>
 
     <div id="controls">
+        <button id="floorCalibBtn" class="warn" onclick="toggleFloorCalib()">床キャリブ</button>
         <button id="anchorBtn" class="warn" onclick="toggleAnchor()">カメラ固定</button>
         <button id="recordBtn" onclick="recordWheel()">この輪を記録</button>
         <button onclick="showResults()" class="sec">結果を見る</button>
+        <button onclick="clearFloor()" class="sec">床消去</button>
         <button onclick="clearAll()" class="sec">全消去</button>
     </div>
 
@@ -146,27 +149,34 @@ const logEl = $('log-panel');
 let detector = null;
 let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 
-// ===== 床タグ世界座標（メートル）=====
-const FLOOR_WORLD = { 44:[0,0,0], 45:[0.2,0,0], 46:[0,0,0.2], 47:[0.2,0,0.2] };
+// ===== 床タグ世界座標（自動キャリブで学習・localStorageに保存）=====
+// ドデカと同原理: 床タグ中心(pose.t)の距離から配置を自動復元（定規不要）。
+// スケールはタグサイズ(FLOOR_TAG_SIZE)由来。復元後、床平面をy≈0に整列。
+let floorWorld = loadFloorWorld();   // {id:[x,y,z]} | null
 const FLOOR_IDS = [44, 45, 46, 47];
-const FLOOR_TAG_SIZE = 0.15; // 150mm
+const FLOOR_TAG_SIZE = 0.089; // iPad表示・黒部実測89mm
 const MIN_FLOOR_PX = 40;
 const MIN_WHEEL_PX = 60;
 
-// ===== ホイールタグID =====
-const WHEEL_IDS_MIN = 1, WHEEL_IDS_MAX = 11;
+function loadFloorWorld(){
+    try { const s = localStorage.getItem('scanscope_floor_world'); if (s) return JSON.parse(s); } catch(e) {}
+    return null;
+}
+
+// ===== ホイールタグID（ドデカ: 一番上=12・第一リング2〜6・第二リング7〜11）=====
+const WHEEL_IDS_MIN = 2, WHEEL_IDS_MAX = 12;
 
 // ===== ドデカ本体モデル（dodeca.htmlのlocalStorageから読み込み）=====
+// ドデカ診断モード(scanscope_diag_model)を優先、旧キーにフォールバック
 let bodyModel = null; // {id_str: [x,y,z]}
 {
     try {
-        const s = localStorage.getItem('scanscope_dodeca_model');
-        if (s) {
+        for (const key of ['scanscope_diag_model', 'scanscope_dodeca_model']) {
+            const s = localStorage.getItem(key);
+            if (!s) continue;
             const m = JSON.parse(s);
             const P = m.A?.P || m.B?.P || null;
-            if (P && Object.keys(P).length >= 3) {
-                bodyModel = P;
-            }
+            if (P && Object.keys(P).length >= 3) { bodyModel = P; break; }
         }
     } catch(e) {}
 }
@@ -205,11 +215,84 @@ function matMul(A,B){
 }
 function matVec(R,v){ return [R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2], R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2], R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]]; }
 function centroid3(pts){ const c=[0,0,0]; for(const p of pts){c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];} return [c[0]/pts.length,c[1]/pts.length,c[2]/pts.length]; }
+function vsub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function vdot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function vcross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function vnorm(a){ const n=Math.hypot(a[0],a[1],a[2]); return n>1e-9?[a[0]/n,a[1]/n,a[2]/n]:a; }
+
+// ===== 床マップ自動キャリブ =====
+let floorCalibrating = false, floorCalibFrames = [];
+
+function toggleFloorCalib(){
+    const btn = $('floorCalibBtn');
+    if (!floorCalibrating) {
+        floorCalibrating = true; floorCalibFrames = [];
+        btn.textContent = '床キャリブ終了'; btn.className = 'green';
+        addLog('床キャリブ開始: 床タグ4枚が同時に映る距離から、ゆっくり視点を変えて10秒ほど映してください');
+        return;
+    }
+    floorCalibrating = false;
+    btn.textContent = '床キャリブ'; btn.className = 'warn';
+    finishFloorCalib();
+}
+
+function finishFloorCalib(){
+    const frames = floorCalibFrames; floorCalibFrames = [];
+    if (frames.length < 5) { addLog(`❌ 床キャリブ失敗: フレーム不足(${frames.length})。タグ2枚以上が同時に映る状態で長めに映してください。`); return; }
+    const idset = new Set(); frames.forEach(fr => Object.keys(fr).forEach(id => idset.add(+id)));
+    const { pos, placed, failed } = WMGeom.buildBody([...idset], frames);
+    if (placed.length < 3) { addLog(`❌ 床キャリブ失敗: 復元${placed.length}枚のみ。全タグが他のタグと同時に映るようにしてください。`); return; }
+    // 床平面に整列: 原点=最小ID・x軸=次のIDへ・y=平面法線（鏡像はlocalizeCameraのcamY判定で解決）
+    const ids = placed.map(Number).sort((a,b)=>a-b);
+    const o = pos[ids[0]];
+    const ex = vnorm(vsub(pos[ids[1]], o));
+    let n = null;
+    for (let k = 2; k < ids.length; k++) {
+        const c = vcross(ex, vsub(pos[ids[k]], o));
+        if (Math.hypot(c[0],c[1],c[2]) > 1e-6) { n = vnorm(c); break; }
+    }
+    if (!n) { addLog('❌ 床キャリブ失敗: タグがほぼ一直線です。2×2に並べ直してください。'); return; }
+    const ey = n, ez = vcross(ex, ey);
+    const world = {};
+    let maxOff = 0;
+    for (const id of ids) {
+        const d = vsub(pos[id], o);
+        const p = [vdot(d,ex), vdot(d,ey), vdot(d,ez)];
+        maxOff = Math.max(maxOff, Math.abs(p[1]));
+        world[id] = p;
+    }
+    // 品質: 各キャリブフレームを学習マップにHorn整合した残差の中央値
+    const rmss = [];
+    for (const fr of frames) {
+        const fids = Object.keys(fr).filter(id => world[id]);
+        if (fids.length < 3) continue;
+        rmss.push(WMGeom.hornPose(fids.map(id=>world[id]), fids.map(id=>fr[id])).rms * 1000);
+    }
+    rmss.sort((a,b)=>a-b);
+    const medRms = rmss.length ? rmss[Math.floor(rmss.length/2)] : 0;
+    floorWorld = world;
+    localStorage.setItem('scanscope_floor_world', JSON.stringify(world));
+    // 中心間距離ログ（検算用: iPad画面上の見た目と照合できる）
+    const dists = [];
+    for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++) {
+        const dv = vsub(world[ids[j]], world[ids[i]]);
+        dists.push(`${ids[i]}-${ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`);
+    }
+    addLog(`✅ 床マップ学習: ${ids.length}枚 残差中央${medRms.toFixed(1)}mm 平面度${(maxOff*1000).toFixed(1)}mm${failed.length?` 欠${failed.length}`:''}`);
+    addLog(`　中心間距離: ${dists.join(' ')}`);
+}
+
+function clearFloor(){
+    floorWorld = null; floorCalibFrames = [];
+    localStorage.removeItem('scanscope_floor_world');
+    addLog('床マップを消去しました');
+}
 
 // ===== カメラ自己位置推定（床タグから）=====
 function localizeCamera(visibleFloor) {
-    if (visibleFloor.length < 2) return null;
-    const P = visibleFloor.map(f => FLOOR_WORLD[f.id]);
+    if (!floorWorld) return null;                      // 床マップ未学習
+    if (visibleFloor.length < 3) return null;          // 2点では基線まわりの回転が不定
+    const P = visibleFloor.map(f => floorWorld[f.id]);
     const C = visibleFloor.map(f => f.t);
     if (P.some(p => !p)) return null;
     const sol = WMGeom.hornPose(P, C);
@@ -308,9 +391,15 @@ function updatePanel(cameraPose, wheelEst) {
     }
 
     // 床タグ
-    if (cameraPose) {
+    if (floorCalibrating) {
+        $('s-floor').innerHTML = `<span class="mid">床キャリブ中… ${floorCalibFrames.length}フレーム</span>`;
+        $('s-camH').textContent = '-';
+    } else if (cameraPose) {
         $('s-floor').innerHTML = `<span class="good">検出 残差${cameraPose.rms.toFixed(1)}mm H=${(cameraPose.camH*100).toFixed(0)}cm</span>`;
         $('s-camH').textContent = `${(cameraPose.camH * 100).toFixed(1)} cm`;
+    } else if (!floorWorld) {
+        $('s-floor').innerHTML = '<span class="mid">マップ未学習（床キャリブを押す）</span>';
+        $('s-camH').textContent = '-';
     } else {
         $('s-floor').innerHTML = '<span class="mid">なし（固定カメラモード）</span>';
         $('s-camH').textContent = '-';
@@ -435,9 +524,15 @@ function process() {
     floorDets.forEach(d => drawTag(d, '#ffd700'));
     wheelDets.forEach(d => drawTag(d, '#00ff00'));
 
+    // 床キャリブ中: タグ中心位置を収集
+    if (floorCalibrating && floorDets.length >= 2) {
+        const fr = {}; for (const d of floorDets) fr[d.id] = d.pose.t;
+        floorCalibFrames.push(fr);
+    }
+
     // カメラ自己位置（床タグから）
     let cameraPose = null;
-    if (floorDets.length >= 2) {
+    if (floorDets.length >= 3) {
         const visible = floorDets.map(d => ({ id: d.id, t: d.pose.t }));
         cameraPose = localizeCamera(visible);
     }
