@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.0';
+    const _V = 'd0.9.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.9.0</p>
+    <p style="color:#555;">d0.9.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -121,7 +121,7 @@
     <div id="log-panel"></div>
 </div>
 
-<script src="./wm_geom.js"></script>
+<script src="./wm_geom.js?v=d091"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -409,12 +409,22 @@ function finishCalibrate(){
             }
         }
         const Q={};
+        const sups=[];
+        let candTotal=0;
         for(const id of pids){
-            const pick=WMGeom.pickStableRotation(rotCands[id]||[], 15, rotWts[id]);
-            if(pick && pick.support>=0.5) Q[id]=pick.R;    // 重み付き支持率50%未満は信頼しない（PnP対象外）
+            const cands=rotCands[id]||[];
+            candTotal+=cands.length;
+            // 粗クラスタ25°（手持ち回転キャリブのブラー込みジッタを許容）→12°以内で再平均
+            const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
+            sups.push(pick?pick.support:0);
+            if(!pick || pick.support<0.25) continue;       // 支持率25%未満は信頼しない（PnP対象外）
+            const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
+            Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
         }
         model[g].Q=Q;
-        msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面${failed.length?` 欠${failed.length}`:''}`);
+        const supMax=sups.length?Math.round(Math.max(...sups)*100):0;
+        const supMin=sups.length?Math.round(Math.min(...sups)*100):0;
+        msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
