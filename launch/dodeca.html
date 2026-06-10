@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.2';
+    const _V = 'd0.9.3';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.9.2</p>
+    <p style="color:#555;">d0.9.3</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -425,6 +425,8 @@ function finishCalibrate(){
         model[g].Q=Q; model[g].Qs=Qs;
         const supMax=sups.length?Math.round(Math.max(...sups)*100):0;
         const supMin=sups.length?Math.round(Math.min(...sups)*100):0;
+        // テスト条件ヘッダー用メタ（記録ログに自動で入る）
+        model[g].meta={ rms:+medRms.toFixed(1), supMin, supMax, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) };
         msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
     }
     saveModel();
@@ -553,8 +555,26 @@ function bodyStability(g){
 let recording=false, recordLog=[], recordStart=0, recordTimer=null;
 let _lastEstForRecord=null; // doMeasureから参照用
 
+// テスト条件ヘッダー: 記録ログの先頭に自動で埋め込む（この行群だけで条件が再現できる状態にする）
+function condHeader(){
+    const lines=[];
+    lines.push(`[条件] APP:dodeca ${_V} モード:${mode} SW:${diagCfgStr()} 解像度:${overlay.width}x${overlay.height}`);
+    for(const g of GROUPS){
+        const m=model[g.key]||{};
+        const nP=Object.keys(m.P||{}).length, nQ=Object.keys(m.Q||{}).length;
+        if(!nP) continue;
+        const meta=m.meta?`キャリブ残差${m.meta.rms}mm 支持${m.meta.supMin}〜${m.meta.supMax}% (${m.meta.at})`:'旧キャリブ・メタなし（要再キャリブ）';
+        lines.push(`[条件] モデル${g.key}: 学習${nP}面 向き${nQ}面 ${meta}`);
+    }
+    lines.push(`[条件] タグ: ${mode==='diag'?($('tagSizeInput').value+'mm'):'側面55/上面80mm(上面=ID1/11)'}`);
+    return lines;
+}
+
 function startRecord(){
+    const memo=prompt('テスト条件メモ（距離・固定方法・照明など）','')||'';
     recording=true; recordLog=[]; recordStart=performance.now();
+    condHeader().forEach(l=>recordLog.push(l));
+    if(memo) recordLog.push(`[条件] メモ: ${memo}`);
     const btn=$('recordBtn'); btn.textContent='■停止'; btn.style.background='#ff3b30'; btn.style.color='';
     btn.onclick=()=>stopRecord();
     $('log-title').textContent='記録中…';
@@ -596,7 +616,8 @@ function stopRecord(){
         const avg=a=>a.length?(a.reduce((s,v)=>s+v,0)/a.length).toFixed(2):'-';
         summary+=` 絶対トーavg:${avg(ts)}°`;
     }
-    const header=`=== 記録終了 +${dur}s (${recordLog.length}サンプル)${summary} ===`;
+    const nData=recordLog.filter(l=>l.startsWith('[+')).length;
+    const header=`=== 記録終了 +${dur}s (${nData}サンプル)${summary} ===`;
     recordLog.push(header);
     const fullText=[`=== 記録 ${new Date().toLocaleTimeString()} ===`, ...recordLog].join('\n');
     addLog(header);

@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.3.2';
+    const _V = 'a0.4.0';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.3.2</p>
+    <p style="color:#555;">a0.4.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -133,6 +133,8 @@
         <button id="anchorBtn" class="warn" onclick="toggleAnchor()">カメラ固定</button>
         <button id="recordBtn" onclick="recordWheel()">この輪を記録</button>
         <button id="lockBtn" class="sec" onclick="toggleLock()">ロック</button>
+        <button id="vpBtn" class="sec" onclick="recordViewpoint()">視点記録</button>
+        <button class="sec" onclick="copyLog()">ログコピー</button>
         <button onclick="showResults()" class="sec">結果を見る</button>
         <button onclick="clearFloor()" class="sec">床消去</button>
         <button onclick="clearAll()" class="sec">全消去</button>
@@ -149,7 +151,7 @@
     <button id="copyResultBtn" class="green" style="margin-top:4px;">結果をコピー</button>
 </div>
 
-<script src="./wm_geom.js"></script>
+<script src="./wm_geom.js?v=d091"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -180,15 +182,17 @@ const WHEEL_IDS_MIN = 2, WHEEL_IDS_MAX = 12;
 
 // ===== ドデカ本体モデル（dodeca.htmlのlocalStorageから読み込み）=====
 // ドデカ診断モード(scanscope_diag_model)を優先、旧キーにフォールバック
-let bodyModel = null; // {id_str: [x,y,z]}
+// Q/Qs（タグ向き・支持率）があればコーナーPnPを実行
+let bodyModel = null, bodyQ = null, bodyQs = null;
 {
     try {
         for (const key of ['scanscope_diag_model', 'scanscope_dodeca_model']) {
             const s = localStorage.getItem(key);
             if (!s) continue;
             const m = JSON.parse(s);
-            const P = m.A?.P || m.B?.P || null;
-            if (P && Object.keys(P).length >= 3) { bodyModel = P; break; }
+            const grp = (m.A&&m.A.P&&Object.keys(m.A.P).length>=3) ? m.A
+                      : (m.B&&m.B.P&&Object.keys(m.B.P).length>=3) ? m.B : null;
+            if (grp) { bodyModel = grp.P; bodyQ = grp.Q||null; bodyQs = grp.Qs||null; break; }
         }
     } catch(e) {}
 }
@@ -290,6 +294,10 @@ function finishFloorCalib(){
         const dv = vsub(world[ids[j]], world[ids[i]]);
         dists.push(`${ids[i]}-${ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`);
     }
+    localStorage.setItem('scanscope_floor_meta', JSON.stringify({
+        rms:+medRms.toFixed(1), planar:+(maxOff*1000).toFixed(1),
+        at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
+    }));
     addLog(`✅ 床マップ学習: ${ids.length}枚 残差中央${medRms.toFixed(1)}mm 平面度${(maxOff*1000).toFixed(1)}mm${failed.length?` 欠${failed.length}`:''}`);
     addLog(`　中心間距離: ${dists.join(' ')}`);
 }
@@ -297,6 +305,7 @@ function finishFloorCalib(){
 function clearFloor(){
     floorWorld = null; floorCalibFrames = [];
     localStorage.removeItem('scanscope_floor_world');
+    localStorage.removeItem('scanscope_floor_meta');
     addLog('床マップを消去しました');
 }
 
@@ -332,7 +341,25 @@ function localizeCamera(visibleFloor) {
     return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms };
 }
 
-// ===== ホイール姿勢推定 =====
+// ===== ホイール姿勢推定（Horn初期化→コーナーPnP・dodeca.htmlと同方式）=====
+const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+function resolveCornerOrderA(Xc, obs, R, t){
+    const pred=Xc.map(x=>{
+        const Y=WMGeom.matVec3(R,x), z=Y[2]+t[2];
+        return [1243*(Y[0]+t[0])/z+overlay.width/2, 1243*(Y[1]+t[1])/z+overlay.height/2];
+    });
+    let best=null;
+    for(let rev=0;rev<2;rev++){
+        const o=rev?[...obs].reverse():obs;
+        for(let s=0;s<4;s++){
+            let e=0;
+            for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); }
+            if(!best||e<best.e) best={e, arr:[0,1,2,3].map(k=>o[(k+s)%4])};
+        }
+    }
+    return best.e/4<40 ? best.arr : null;
+}
+
 function estimateWheelPose(wheelDets, cameraPose) {
     if (!bodyModel) return null;
     const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
@@ -342,17 +369,79 @@ function estimateWheelPose(wheelDets, cameraPose) {
     const sol = WMGeom.hornPose(P, C);
     const residual = sol.rms * 1000;
     if (residual > 8) return null;                     // 品質不足は棄却（dodeca.htmlと同基準）
-    let R = sol.R;
+    let Rcam = sol.R, method = '中心', pnpRms = null;
+
+    if (bodyQ) {
+        const pb = centroid3(P), cb = centroid3(C);
+        const Rp = WMGeom.matVec3(Rcam, pb);
+        const t0 = [cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
+        const hh = (parseFloat($('tagSizeInput').value)||36)/2000;
+        const tags = [];
+        for (const d of valid) {
+            const id = String(d.id), q = bodyQ[id];
+            if (!q) continue;
+            if (bodyQs && bodyQs[id]!=null && bodyQs[id]<0.25) continue;
+            const p0 = bodyModel[id];
+            const Xc = TAG_LOCAL(hh).map(l=>{ const v=WMGeom.matVec3(q,l); return [p0[0]+v[0],p0[1]+v[1],p0[2]+v[2]]; });
+            const ord = resolveCornerOrderA(Xc, d.corners.map(c=>[c.x,c.y]), Rcam, t0);
+            if (!ord) continue;
+            tags.push({Xc, uv:ord});
+        }
+        const K = {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2};
+        const run = arr => {
+            const X=[],uv=[];
+            for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
+            return X.length>=8 ? WMGeom.pnpRefine(X,uv,K,Rcam,t0,10) : null;
+        };
+        let ref = run(tags), used = tags.length;
+        if (ref) {
+            const perTag = tags.map(tg=>{
+                let s=0;
+                for(let k=0;k<4;k++){
+                    const Y=WMGeom.matVec3(ref.R,tg.Xc[k]), z=Y[2]+ref.t[2];
+                    const u=K.fx*(Y[0]+ref.t[0])/z+K.cx, v=K.fy*(Y[1]+ref.t[1])/z+K.cy;
+                    s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
+                }
+                return Math.sqrt(s/4);
+            });
+            const med=[...perTag].sort((a,b)=>a-b)[Math.floor(perTag.length/2)];
+            const keep=tags.filter((_,i)=>perTag[i]<=Math.max(2.5*med,4));
+            if(keep.length<tags.length && keep.length>=2){
+                const r2=run(keep);
+                if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; }
+            }
+            if(ref.rmsPx<15){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+        }
+    }
+
+    let R = Rcam;
     let mode = 'camera';
     if (cameraPose) {
-        R = matMul(matT(cameraPose.R_world_to_cam), sol.R);
+        R = matMul(matT(cameraPose.R_world_to_cam), Rcam);
         mode = 'world';
     }
-    return { R, mode, residual, faces: valid.length };
+    return { R, mode, residual, faces: valid.length, method, pnpRms };
 }
 
 // ===== 世界姿勢ロック（視点バイアス検証・世界座標系なので数学的に正当）=====
-let refRbw = null, rbwHist = [];
+let refRbw = null, rbwHist = [], lastVdiff = null, vpCount = 0;
+
+// 視点記録: ボタンを押した瞬間の測定値を1行ログに残す（テスト結果の正確な受け渡し用）
+function recordViewpoint(){
+    if(!currentMeasure){ addLog('❌ 視点記録失敗: ターゲット未検出'); return; }
+    if(currentMeasure.mode!=='world'){ addLog('❌ 視点記録失敗: world測定になっていません（床タグ3枚以上を映す）'); return; }
+    vpCount++;
+    const cp=currentMeasure.cameraPose;
+    const vd=(refRbw&&lastVdiff!=null)?`視点差分${lastVdiff.toFixed(2)}°`:'視点差分-（未ロック）';
+    const pn=`${currentMeasure.method||''}${currentMeasure.pnpRms!=null?` ${currentMeasure.pnpRms.toFixed(1)}px`:''}`;
+    addLog(`★視点${vpCount} | ${vd} ヨー${currentMeasure.yaw>=0?'+':''}${currentMeasure.yaw.toFixed(2)}° ${currentMeasure.faces}面 ${pn} Horn${currentMeasure.residual.toFixed(1)}mm 床残差${(cp.rms*1000).toFixed(1)}mm H${(cp.camH*100).toFixed(0)}cm`);
+}
+
+// ログ全文コピー（時系列順）
+function copyLog(){
+    const txt=[...logEl.children].map(e=>e.textContent).reverse().join('\n');
+    navigator.clipboard.writeText(txt).then(()=>addLog('✅ ログをコピーしました（時系列順）'));
+}
 
 function angBetween(A,B){
     const R=matMul(matT(A),B);
@@ -376,8 +465,13 @@ function toggleLock(){
     if(refRbw){ refRbw=null; btn.textContent='ロック'; btn.className='sec'; addLog('世界姿勢ロック解除'); return; }
     if(rbwHist.length<10){ addLog(`❌ ロック失敗: world測定フレーム不足（${rbwHist.length}/10）。床タグとドデカを同時に映して静止してください。`); return; }
     refRbw=avgRot(rbwHist.slice(-15));
+    vpCount=0;
     btn.textContent='ロック解除'; btn.className='green';
-    addLog('✅ 世界姿勢ロック（15フレーム平均）。カメラを動かして視点差分を確認。0.5°以内=視点バイアス相殺の実証。');
+    // テスト条件をログに固定（コピーしたログだけで条件が再現できるように）
+    let fm=null; try{ fm=JSON.parse(localStorage.getItem('scanscope_floor_meta')); }catch(e){}
+    const nP=bodyModel?Object.keys(bodyModel).length:0, nQ=bodyQ?Object.keys(bodyQ).length:0;
+    addLog(`[条件] APP:align4 ${_V} タグ${$('tagSizeInput').value}mm モデル${nP}面/向き${nQ}面 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
+    addLog('✅ 世界姿勢ロック（15フレーム平均）。各視点で静止→「視点記録」を押す。0.5°以内=視点バイアス相殺の実証。');
 }
 
 // ===== ヨー角（水平方向の向き）=====
@@ -452,7 +546,7 @@ function updatePanel(cameraPose, wheelEst) {
     if (wheelEst) {
         $('s-wheel').innerHTML = `<span class="good">${wheelEst.faces}面 残差${wheelEst.residual.toFixed(1)}mm</span>`;
         $('s-resid').textContent = `${wheelEst.residual.toFixed(1)} mm`;
-        $('s-faces').textContent = `${wheelEst.faces} 面 (${wheelEst.mode})`;
+        $('s-faces').textContent = `${wheelEst.faces} 面 (${wheelEst.mode}) ${wheelEst.method||''}${wheelEst.pnpRms!=null?` ${wheelEst.pnpRms.toFixed(1)}px`:''}`;
         const yaw = extractYaw(wheelEst.R);
         $('s-yaw').textContent = `${yaw >= 0 ? '+' : ''}${yaw.toFixed(2)}°`;
         const cls = Math.abs(yaw) < 1 ? 'good' : Math.abs(yaw) < 3 ? 'mid' : 'bad';
@@ -462,13 +556,16 @@ function updatePanel(cameraPose, wheelEst) {
             rbwHist.push(wheelEst.R); if (rbwHist.length > 15) rbwHist.shift();
             if (refRbw) {
                 const vd = angBetween(refRbw, wheelEst.R);
+                lastVdiff = vd;
                 $('s-vdiff').textContent = `${vd.toFixed(2)}°`;
                 $('s-vdiff').className = vd < 0.5 ? 'val good' : vd < 1.5 ? 'val mid' : 'val bad';
             } else {
+                lastVdiff = null;
                 $('s-vdiff').textContent = '未ロック';
                 $('s-vdiff').className = 'val';
             }
         } else {
+            lastVdiff = null;
             $('s-vdiff').textContent = '-（要world）';
             $('s-vdiff').className = 'val';
         }
@@ -534,7 +631,7 @@ async function init() {
         $('loading-msg').textContent = 'カメラ起動中...';
         await startCamera();
         if (!bodyModel) addLog('⚠ dodeca.htmlでキャリブ済みモデルが見つかりません。先にdodeca.htmlでキャリブしてください。');
-        else addLog(`✅ ドデカモデル読み込み: ${Object.keys(bodyModel).length}面`);
+        else addLog(`✅ ドデカモデル読み込み: ${Object.keys(bodyModel).length}面 向き${bodyQ?Object.keys(bodyQ).length:0}面${bodyQ?'（PnP可）':'（PnP不可・dodeca.htmlで再キャリブを）'}`);
     } catch(e) {
         $('loading-msg').textContent = 'エラー: ' + e.message;
         console.error(e);
