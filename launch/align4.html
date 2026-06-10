@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>ScanScope 4輪アライメント</title>
     <script>
-    const _V = 'a0.2.0';
+    const _V = 'a0.3.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -56,7 +56,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.2.0</p>
+    <p style="color:#555;">a0.3.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -113,6 +113,7 @@
         <div class="row"><span class="lbl">Horn残差</span><span class="val" id="s-resid">-</span></div>
         <div class="row"><span class="lbl">検出面数</span><span class="val" id="s-faces">-</span></div>
         <div class="row"><span class="lbl">ヨー（トー代理）</span><span class="val" id="s-yaw" style="font-size:18px;">-</span></div>
+        <div class="row"><span class="lbl">視点差分（world・ロック比）</span><span class="val" id="s-vdiff">-</span></div>
         <div class="row"><span class="lbl">キャンバー（IMU）</span><span class="val" id="s-camber">-</span></div>
         <div class="row"><span class="lbl">カメラ高さ</span><span class="val" id="s-camH">-</span></div>
     </div>
@@ -121,6 +122,7 @@
         <button id="floorCalibBtn" class="warn" onclick="toggleFloorCalib()">床キャリブ</button>
         <button id="anchorBtn" class="warn" onclick="toggleAnchor()">カメラ固定</button>
         <button id="recordBtn" onclick="recordWheel()">この輪を記録</button>
+        <button id="lockBtn" class="sec" onclick="toggleLock()">ロック</button>
         <button onclick="showResults()" class="sec">結果を見る</button>
         <button onclick="clearFloor()" class="sec">床消去</button>
         <button onclick="clearAll()" class="sec">全消去</button>
@@ -328,13 +330,44 @@ function estimateWheelPose(wheelDets, cameraPose) {
     const P = valid.map(d => bodyModel[String(d.id)]);
     const C = valid.map(d => d.pose.t);
     const sol = WMGeom.hornPose(P, C);
+    const residual = sol.rms * 1000;
+    if (residual > 8) return null;                     // 品質不足は棄却（dodeca.htmlと同基準）
     let R = sol.R;
     let mode = 'camera';
     if (cameraPose) {
         R = matMul(matT(cameraPose.R_world_to_cam), sol.R);
         mode = 'world';
     }
-    return { R, mode, residual: sol.rms * 1000, faces: valid.length };
+    return { R, mode, residual, faces: valid.length };
+}
+
+// ===== 世界姿勢ロック（視点バイアス検証・世界座標系なので数学的に正当）=====
+let refRbw = null, rbwHist = [];
+
+function angBetween(A,B){
+    const R=matMul(matT(A),B);
+    const tr=R[0][0]+R[1][1]+R[2][2];
+    return Math.acos(Math.max(-1,Math.min(1,(tr-1)/2)))*180/Math.PI;
+}
+// 近接回転の平均: 行列を成分平均→列をGram-Schmidt直交化
+function avgRot(Rs){
+    const M=[[0,0,0],[0,0,0],[0,0,0]];
+    for(const R of Rs) for(let i=0;i<3;i++)for(let j=0;j<3;j++) M[i][j]+=R[i][j];
+    let c0=vnorm([M[0][0],M[1][0],M[2][0]]);
+    let c1=[M[0][1],M[1][1],M[2][1]];
+    const d=vdot(c0,c1);
+    c1=vnorm(vsub(c1,[c0[0]*d,c0[1]*d,c0[2]*d]));
+    const c2=vcross(c0,c1);
+    return [[c0[0],c1[0],c2[0]],[c0[1],c1[1],c2[1]],[c0[2],c1[2],c2[2]]];
+}
+
+function toggleLock(){
+    const btn=$('lockBtn');
+    if(refRbw){ refRbw=null; btn.textContent='ロック'; btn.className='sec'; addLog('世界姿勢ロック解除'); return; }
+    if(rbwHist.length<10){ addLog(`❌ ロック失敗: world測定フレーム不足（${rbwHist.length}/10）。床タグとドデカを同時に映して静止してください。`); return; }
+    refRbw=avgRot(rbwHist.slice(-15));
+    btn.textContent='ロック解除'; btn.className='green';
+    addLog('✅ 世界姿勢ロック（15フレーム平均）。カメラを動かして視点差分を確認。0.5°以内=視点バイアス相殺の実証。');
 }
 
 // ===== ヨー角（水平方向の向き）=====
@@ -395,7 +428,7 @@ function updatePanel(cameraPose, wheelEst) {
         $('s-floor').innerHTML = `<span class="mid">床キャリブ中… ${floorCalibFrames.length}フレーム</span>`;
         $('s-camH').textContent = '-';
     } else if (cameraPose) {
-        $('s-floor').innerHTML = `<span class="good">検出 残差${cameraPose.rms.toFixed(1)}mm H=${(cameraPose.camH*100).toFixed(0)}cm</span>`;
+        $('s-floor').innerHTML = `<span class="good">検出 残差${(cameraPose.rms*1000).toFixed(1)}mm H=${(cameraPose.camH*100).toFixed(0)}cm</span>`;
         $('s-camH').textContent = `${(cameraPose.camH * 100).toFixed(1)} cm`;
     } else if (!floorWorld) {
         $('s-floor').innerHTML = '<span class="mid">マップ未学習（床キャリブを押す）</span>';
@@ -414,12 +447,29 @@ function updatePanel(cameraPose, wheelEst) {
         $('s-yaw').textContent = `${yaw >= 0 ? '+' : ''}${yaw.toFixed(2)}°`;
         const cls = Math.abs(yaw) < 1 ? 'good' : Math.abs(yaw) < 3 ? 'mid' : 'bad';
         $('s-yaw').className = `val ${cls}`;
+        // 視点差分（world姿勢のみ・ロック比）
+        if (wheelEst.mode === 'world') {
+            rbwHist.push(wheelEst.R); if (rbwHist.length > 15) rbwHist.shift();
+            if (refRbw) {
+                const vd = angBetween(refRbw, wheelEst.R);
+                $('s-vdiff').textContent = `${vd.toFixed(2)}°`;
+                $('s-vdiff').className = vd < 0.5 ? 'val good' : vd < 1.5 ? 'val mid' : 'val bad';
+            } else {
+                $('s-vdiff').textContent = '未ロック';
+                $('s-vdiff').className = 'val';
+            }
+        } else {
+            $('s-vdiff').textContent = '-（要world）';
+            $('s-vdiff').className = 'val';
+        }
     } else {
         $('s-wheel').innerHTML = '<span class="mid">未検出</span>';
         $('s-resid').textContent = '-';
         $('s-faces').textContent = '-';
         $('s-yaw').textContent = '-';
         $('s-yaw').className = 'val';
+        $('s-vdiff').textContent = '-';
+        $('s-vdiff').className = 'val';
     }
 
     // キャンバー（IMU）
