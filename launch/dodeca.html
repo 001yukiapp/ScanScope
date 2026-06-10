@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.9.1';
+    const _V = 'd0.9.2';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.9.1</p>
+    <p style="color:#555;">d0.9.2</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -408,7 +408,7 @@ function finishCalibrate(){
                 }
             }
         }
-        const Q={};
+        const Q={}, Qs={};
         const sups=[];
         let candTotal=0;
         for(const id of pids){
@@ -420,8 +420,9 @@ function finishCalibrate(){
             if(!pick || pick.support<0.25) continue;       // 支持率25%未満は信頼しない（PnP対象外）
             const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
             Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
+            Qs[id]=pick.support;
         }
-        model[g].Q=Q;
+        model[g].Q=Q; model[g].Qs=Qs;
         const supMax=sups.length?Math.round(Math.max(...sups)*100):0;
         const supMin=sups.length?Math.round(Math.min(...sups)*100):0;
         msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
@@ -477,7 +478,7 @@ function fuseBody(g, list){
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
     if(cfg.outlier&&residual>8) return null;               // 残差8mm超は品質不足で棄却
-    let R=sol.R, method='中心', pnpRms=null;
+    let R=sol.R, method='中心', pnpRms=null, pnpFail=null;
 
     if(cfg.pnp){
         // 初期並進: 重み付き重心から
@@ -486,9 +487,11 @@ function fuseBody(g, list){
         for(let a=0;a<3;a++){ pb[a]/=wsum; cb[a]/=wsum; }
         const Rp=WMGeom.matVec3(R,pb);
         const t0=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
-        const X=[], uv=[];
+        const Qs=model[g].Qs||{};
+        const tags=[];
         for(const d of dets){
             if(!Q[d.id]) continue;                          // 向き未学習タグはPnP対象外
+            if(Qs[d.id]!=null && Qs[d.id]<0.25) continue;   // 低支持率の向きは使わない
             const hh=tagSizeM(d.id)/2;
             const Xc=TAG_LOCAL(hh).map(l=>{
                 const v=WMGeom.matVec3(Q[d.id],l);
@@ -497,14 +500,38 @@ function fuseBody(g, list){
             const obs=d.corners.map(c=>[c.x,c.y]);
             const ord=resolveCornerOrder(Xc, obs, R, t0);
             if(!ord) continue;
-            for(let k=0;k<4;k++){ X.push(Xc[k]); uv.push(ord[k]); }
+            tags.push({Xc, uv:ord});
         }
-        if(X.length>=8){                                    // 2タグ(8点)以上でPnP実行
-            const ref=WMGeom.pnpRefine(X, uv, {fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2}, R, t0, 10);
-            if(ref && ref.rmsPx<6){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${X.length/4}`; }
+        const K={fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2};
+        const runPnp=arr=>{
+            const X=[],uv=[];
+            for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
+            return X.length>=8 ? WMGeom.pnpRefine(X,uv,K,R,t0,10) : null;
+        };
+        let ref=runPnp(tags), used=tags.length;
+        if(ref){
+            // タグ単位のロバスト除去: per-tag残差が中央値の2.5倍超のタグを外して再推定
+            const perTag=tags.map(tg=>{
+                let s=0;
+                for(let k=0;k<4;k++){
+                    const Y=WMGeom.matVec3(ref.R,tg.Xc[k]), z=Y[2]+ref.t[2];
+                    const u=K.fx*(Y[0]+ref.t[0])/z+K.cx, v=K.fy*(Y[1]+ref.t[1])/z+K.cy;
+                    s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
+                }
+                return Math.sqrt(s/4);
+            });
+            const med=[...perTag].sort((a,b)=>a-b)[Math.floor(perTag.length/2)];
+            const keep=tags.filter((_,i)=>perTag[i]<=Math.max(2.5*med,4));
+            if(keep.length<tags.length && keep.length>=2){
+                const r2=runPnp(keep);
+                if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; }
+            }
+            // 受け入れ: 15px未満（レンズ歪み未補正のため合成テスト基準より緩め）
+            if(ref.rmsPx<15){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+            else pnpFail=ref.rmsPx;                          // 棄却理由を可視化
         }
     }
-    return { R, residual, faces, total:bp.length, method, pnpRms };
+    return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -539,7 +566,7 @@ function startRecord(){
         if(d.mode==='single'){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
-            const pn=d.pnpRms!=null?` ${d.method}:${d.pnpRms.toFixed(1)}px`:` ${d.method||''}`;
+            const pn=d.pnpRms!=null?` ${d.method}:${d.pnpRms.toFixed(1)}px`:` ${d.method||''}${d.pnpFail!=null?`(P棄${d.pnpFail.toFixed(1)}px)`:''}`;
             recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
@@ -638,14 +665,14 @@ function doMeasure(groups){
         if(est){
             const st=bodyStability(g);
             const viewDiff = refPose ? angBetween(refPose, est.R) : null;
-            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms};
+            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms,pnpFail:est.pnpFail};
             if(viewDiff!=null){
                 $('lbl-main').textContent='視点差分＝カメラ角度を変えたときの本体姿勢ずれ（1°未満=バイアスなし）';
                 $('s-delta').textContent=`${viewDiff.toFixed(2)}°`;
                 $('s-delta').className=viewDiff<1?'val good':viewDiff<3?'val mid':'val bad';
             } else {
                 $('lbl-main').textContent='単体診断モード｜視点ロックで視点バイアスを数値検証できます';
-                $('s-delta').textContent=`${est.faces}面 ${est.method}${est.pnpRms!=null?` ${est.pnpRms.toFixed(1)}px`:''}`;
+                $('s-delta').textContent=`${est.faces}面 ${est.method}${est.pnpRms!=null?` ${est.pnpRms.toFixed(1)}px`:''}${est.pnpFail!=null?`(P棄${est.pnpFail.toFixed(0)}px)`:''}`;
                 $('s-delta').className=est.method&&est.method.startsWith('PnP')?'val good':'val mid';
             }
             $('lbl-sub1').textContent='Horn残差＝タグ中心→剛体モデルの適合誤差（小さいほど検出品質◎ 目安<5mm）';
