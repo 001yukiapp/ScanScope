@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.8.0';
+    const _V = 'a0.8.1';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.8.0</p>
+    <p style="color:#555;">a0.8.1</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -202,15 +202,22 @@ function wheelTagSizeM(id){
 // ===== 本体モデル（dodeca.htmlのlocalStorageから読み込み）=====
 // 選択ターゲットのモデルキー＋グループだけを読む（diag=診断A / facet=前A・後B）。
 // Q/Qs（タグ向き・支持率）があればコーナーPnPを実行
-let bodyModel = null, bodyQ = null, bodyQs = null;
+let bodyModel = null, bodyQ = null, bodyQs = null, modelSpanMm = 0;
 function loadBodyModel(){
-    bodyModel = bodyQ = bodyQs = null;
+    bodyModel = bodyQ = bodyQs = null; modelSpanMm = 0;
     try {
         const s = localStorage.getItem(target.modelKey);
         if (!s) return;
         const grp = JSON.parse(s)[target.group];
         if (grp && grp.P && Object.keys(grp.P).length >= 3) {
             bodyModel = grp.P; bodyQ = grp.Q||null; bodyQs = grp.Qs||null;
+            // モデルスパン（最大面間距離mm）: Horn棄却ゲートのサイズ比例化に使う
+            const ids = Object.keys(bodyModel);
+            for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++){
+                const a=bodyModel[ids[i]], b=bodyModel[ids[j]];
+                const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])*1000;
+                if (d>modelSpanMm) modelSpanMm=d;
+            }
         }
     } catch(e) {}
 }
@@ -396,15 +403,22 @@ function resolveCornerOrderA(Xc, obs, R, t){
     return best.e/4<th ? best.arr : null;
 }
 
+let wheelRejectReason = null;                          // 直近フレームの棄却理由（パネル表示用）
 function estimateWheelPose(wheelDets, cameraPose) {
-    if (!bodyModel) return null;
+    wheelRejectReason = null;
+    if (!bodyModel) { wheelRejectReason = 'モデル未読込'; return null; }
     const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
-    if (valid.length < 4) return null;                 // 視点バイアス実測より3面は絶対測定に不適（12〜15°）
+    if (valid.length < 4) {                            // 視点バイアス実測より3面は絶対測定に不適（12〜15°）
+        if (wheelDets.length) wheelRejectReason = `${valid.length}面<4`;
+        return null;
+    }
     const P = valid.map(d => bodyModel[String(d.id)]);
     const C = valid.map(d => d.pose.t);
     const sol = WMGeom.hornPose(P, C);
     const residual = sol.rms * 1000;
-    if (residual > 8) return null;                     // 品質不足は棄却（dodeca.htmlと同基準）
+    // Horn棄却はモデルスパン比例（8mm固定はドデカ(80mm)基準。ボス(230mm)は正常時6.5〜7mmで誤棄却する）
+    const hornGate = Math.max(8, modelSpanMm * 0.10);
+    if (residual > hornGate) { wheelRejectReason = `Horn残差${residual.toFixed(1)}mm>ゲート${hornGate.toFixed(0)}`; return null; }
     let Rcam = sol.R, method = '中心', pnpRms = null;
 
     if (bodyQ) {
@@ -506,7 +520,7 @@ function avgRot(Rs){
 function toggleLock(){
     const btn=$('lockBtn');
     if(refRbw){ refRbw=null; btn.textContent='ロック'; btn.className='sec'; addLog('世界姿勢ロック解除'); return; }
-    if(rbwHist.length<10){ addLog(`❌ ロック失敗: world測定フレーム不足（${rbwHist.length}/10）。床タグとドデカを同時に映して静止してください。`); return; }
+    if(rbwHist.length<10){ addLog(`❌ ロック失敗: world測定フレーム不足（${rbwHist.length}/10）。床タグ3枚以上と${target.label}4面以上を同時に映して静止してください。`); return; }
     refRbw=avgRot(rbwHist.slice(-15));
     vpCount=0;
     btn.textContent='ロック解除'; btn.className='green';
@@ -613,7 +627,7 @@ function updatePanel(cameraPose, wheelEst) {
             $('s-vdiff').className = 'val';
         }
     } else {
-        $('s-wheel').innerHTML = '<span class="mid">未検出</span>';
+        $('s-wheel').innerHTML = `<span class="mid">未検出${wheelRejectReason ? '（'+wheelRejectReason+'）' : ''}</span>`;
         $('s-resid').textContent = '-';
         $('s-faces').textContent = '-';
         $('s-yaw').textContent = '-';
@@ -759,7 +773,7 @@ function selectWheel(w) {
 // ===== 記録 =====
 function recordWheel() {
     if (!currentMeasure) {
-        addLog('❌ ターゲット未検出。ドデカを映してから記録してください。');
+        addLog(`❌ ターゲット未検出。${target.label}を映してから記録してください。`);
         return;
     }
     if (!anchorOrientation && !currentMeasure.cameraPose) {
