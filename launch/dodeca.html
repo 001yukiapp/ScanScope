@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.11.0';
+    const _V = 'd0.11.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.11.0</p>
+    <p style="color:#555;">d0.11.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -116,8 +116,9 @@
         <button id="resetBtn" class="sec">学習消去</button>
     </div>
 
-    <div id="log-header" style="position:absolute;bottom:162px;left:10px;right:10px;display:flex;justify-content:space-between;align-items:center;padding:0 4px 2px;">
-        <span style="font-size:11px;color:#666;" id="log-title">ログ</span>
+    <div id="log-header" style="position:absolute;bottom:162px;left:10px;right:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:0 4px 2px;">
+        <span style="font-size:11px;color:#666;flex-shrink:0;" id="log-title">ログ</span>
+        <input id="memoInput" type="text" placeholder="記録メモ（距離・固定・照明）" style="flex:1;width:auto;text-align:left;font-size:11px;padding:4px 8px;">
     </div>
     <div id="log-panel"></div>
 </div>
@@ -328,6 +329,7 @@ function process(){
     const gray=new Uint8Array(W*H);
     for(let i=0;i<gray.length;i++) gray[i]=(img.data[i*4]*77+img.data[i*4+1]*151+img.data[i*4+2]*28)>>8;
 
+    checkFrozen(gray);
     let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
 
     ctx.clearRect(0,0,W,H);
@@ -341,6 +343,22 @@ function process(){
 
     if(calibrating){ doCalibrate(groups); }
     doMeasure(groups);
+}
+
+// ===== カメラフリーズ検知 =====
+// 生きたカメラはセンサーノイズで毎フレーム必ず画素が変わる。間引きサンプルのハッシュが
+// 30フレーム連続で同一なら映像停止（iOSのモーダル等で発生）。記録行にも刻印して偽データを防ぐ。
+let _frHash=null, _frSame=0;
+let videoFrozen=false;
+function checkFrozen(gray){
+    let h=0;
+    for(let i=0;i<gray.length;i+=104729) h=(h*31+gray[i])|0;
+    if(h===_frHash){
+        _frSame++;
+        if(_frSame===30) addLog('⚠ カメラ映像が停止しています（30フレーム同一）。このままの測定値は無効。リロードしてください');
+    } else _frSame=0;
+    _frHash=h;
+    videoFrozen=_frSame>=30;
 }
 
 // ===== キャリブレーション（位置ベース＋タグ向き学習）=====
@@ -654,7 +672,7 @@ function detTestFrame(dets, usable){
 function finishDetTest(){
     const {frames, ids}=detTest; detTest=null;
     const btn=$('detTestBtn'); btn.textContent='検出安定'; btn.disabled=false;
-    const lines=[`=== 検出安定 ${DET_TEST_SEC}s ${frames}フレーム ${diagCfgStr()} ===`];
+    const lines=[`=== 検出安定 ${DET_TEST_SEC}s ${frames}フレーム ${diagCfgStr()}${videoFrozen?' ⚠映像停止中（このデータは無効）':''} ===`];
     const idList=Object.keys(ids).map(Number).sort((a,b)=>a-b);
     if(!idList.length){ lines.push('タグ検出なし'); }
     let worst=100;
@@ -698,7 +716,9 @@ function condHeader(){
 }
 
 function startRecord(){
-    const memo=prompt('テスト条件メモ（距離・固定方法・照明など）','')||'';
+    // prompt()は使わない: iOS Safariはモーダル表示でカメラ映像が止まり、
+    // そのまま復帰しないことがある（同一フレームを測り続ける偽安定データになる）
+    const memo=($('memoInput').value||'').trim();
     recording=true; recordLog=[]; recordStart=performance.now();
     condHeader().forEach(l=>recordLog.push(l));
     if(memo) recordLog.push(`[条件] メモ: ${memo}`);
@@ -714,10 +734,10 @@ function startRecord(){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
             const pn=d.pnpRms!=null?` ${d.method}:${d.pnpRms.toFixed(1)}px`:` ${d.method||''}${d.pnpFail!=null?`(P棄${d.pnpFail.toFixed(1)}px)`:''}`;
-            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}`);
+            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
-            recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}`);
+            recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
         }
     },500);
 }
