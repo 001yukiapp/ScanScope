@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.17.0';
+    const _V = 'd0.17.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.17.0</p>
+    <p style="color:#555;">d0.17.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -623,7 +623,9 @@ function refreshQ(g){
             // コーナー予測誤差が旧Qより悪化する更新は拒否する
             if(Q[id]){
                 const eN=qPredErr(g,id,newQ), eO=qPredErr(g,id,Q[id]);
-                if(eN!=null && eO!=null && eN>eO){ rejected++; continue; }
+                // 大幅悪化のみ拒否（20%+2px超）。「わずかでも悪化で拒否」だと現Qを超える候補が
+                // 出ない視点で膠着する（実機: 更新0・悪化拒否3の固着）。F2事故級（7→55px）は弾ける
+                if(eN!=null && eO!=null && eN>eO*1.2+2){ rejected++; continue; }
             }
             Q[id]=newQ; Qs[id]=+pick.support.toFixed(2); changed++;
         }
@@ -663,7 +665,12 @@ function resolveCornerOrder(Xc, obs, R, t){
         }
     }
     const avg=best.e/4;
-    return { arr:best.arr, avg, ok:avg<40 };               // 平均40px超は対応付け失敗
+    // 合格ラインはタグの見かけサイズに比例。40px固定は36mmドデカ（80〜100px）基準で、
+    // ボスの大タグ（110〜160px）では同じ向き誤差でもpxズレが比例して大きく、
+    // 全タグ43〜48pxで数px差の全滅が起きた（2026-06-11実機）
+    let per=0; for(let k=0;k<4;k++){ const a=obs[k], b=obs[(k+1)%4]; per+=Math.hypot(b[0]-a[0],b[1]-a[1]); }
+    const th=Math.max(40, (per/4)*0.4);
+    return { arr:best.arr, avg, ok:avg<th };
 }
 
 function fuseBody(g, list){
