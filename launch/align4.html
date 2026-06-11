@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.6.0';
+    const _V = 'a0.6.1';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.6.0</p>
+    <p style="color:#555;">a0.6.1</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -375,7 +375,11 @@ function resolveCornerOrderA(Xc, obs, R, t){
             if(!best||e<best.e) best={e, arr:[0,1,2,3].map(k=>o[(k+s)%4])};
         }
     }
-    return best.e/4<40 ? best.arr : null;
+    // 合格ラインはタグの見かけサイズに比例（dodeca d0.17.1と同方式。40px固定はドデカ基準で
+    // ボスの大タグでは数px差の全滅が起きる）
+    let per=0; for(let k=0;k<4;k++){ const a=obs[k], b=obs[(k+1)%4]; per+=Math.hypot(b[0]-a[0],b[1]-a[1]); }
+    const th=Math.max(40, (per/4)*0.4);
+    return best.e/4<th ? best.arr : null;
 }
 
 function estimateWheelPose(wheelDets, cameraPose) {
@@ -428,8 +432,10 @@ function estimateWheelPose(wheelDets, cameraPose) {
                 const r2=run(keep);
                 if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; }
             }
-            // 受け入れ20px: dodeca d0.11.0と同じ仮ゲート（系統誤差16〜18px調査中の仮通し）
-            if(ref.rmsPx<20){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+            // 受け入れ仮ゲート: タグ見かけサイズ比例（dodeca d0.18.1と同方式・20px×タグpx/100・20〜40px）
+            const psG=valid.map(d=>tagPx(d)).sort((x,y)=>x-y);
+            const gatePx=Math.min(40, Math.max(20, 20*psG[Math.floor(psG.length/2)]/100));
+            if(ref.rmsPx<gatePx){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
         }
     }
 
