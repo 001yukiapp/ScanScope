@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.15.0';
+    const _V = 'd0.16.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.15.0</p>
+    <p style="color:#555;">d0.16.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -372,7 +372,34 @@ let calibRots   = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
 // キャリブ中の面別収集数（枠の色のライブ表示用。CALIB_OKフレーム集まった面から緑になる）
 const CALIB_OK=25;
 let calibCount = Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
+// キャリブ中の動きゲート: 回している最中（モーションブラー）のフレームを自動棄却し、
+// 静止した瞬間だけ収集する＝「コマ送り」の自動化。タグ中心の画面速度の中央値で判定。
+// 60px/s: 手ブレ（10〜30px/s）と回転中（200px/s前後）を分ける閾値
+const CALIB_MOVE_PXS=60;
+let _calLast=null, calibRejected=0;
+function frameStill(groups){
+    const now=performance.now();
+    const centers={};
+    for(const g of GROUPS.map(g=>g.key)) for(const d of groups[g]){
+        const c=d.corners;
+        centers[d.id]=[(c[0].x+c[1].x+c[2].x+c[3].x)/4,(c[0].y+c[1].y+c[2].y+c[3].y)/4];
+    }
+    const prev=_calLast; _calLast={t:now, centers};
+    if(!prev) return null;
+    const dt=(now-prev.t)/1000; if(dt<=0||dt>1) return null;
+    const vs=[];
+    for(const id of Object.keys(centers)){
+        if(!prev.centers[id]) continue;
+        vs.push(Math.hypot(centers[id][0]-prev.centers[id][0], centers[id][1]-prev.centers[id][1])/dt);
+    }
+    if(vs.length<2) return null;                           // 共通タグ不足→判定不能（棄却数に数えない）
+    vs.sort((a,b)=>a-b);
+    return vs[Math.floor(vs.length/2)]<CALIB_MOVE_PXS;
+}
 function doCalibrate(groups){
+    const still=frameStill(groups);
+    if(still===false){ calibRejected++; return; }          // 動いている間は収集しない
+    if(still===null) return;
     for(const g of GROUPS.map(g=>g.key)){
         const list=groups[g].filter(d=>d.pose&&d.pose.t);
         if(list.length<2) continue;                        // 距離を測るには2面以上
@@ -484,7 +511,7 @@ function finishCalibrate(){
         msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
     }
     saveModel();
-    addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
+    addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・静止時間が短すぎる可能性）'}${calibRejected?` 動き棄却${calibRejected}f`:''}`);
     faceMsgs.forEach(l=>addLog(l));
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
 }
@@ -1126,9 +1153,10 @@ function armedClick(btn, warnText, fn){
 }
 
 const startCalib=()=>{
-    calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
+    calibrating=true; _calLast=null; calibRejected=0;
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
     $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
-    addLog('キャリブ開始: コマ送り（30〜45°回して1〜2秒静止）で全面25/25緑＋半周');
+    addLog('キャリブ開始: 回して→止める、の繰り返しで全面25/25緑＋半周（動いている間は自動で収集停止）');
 };
 const armedCalibStart=armedClick($('calibBtn'), '⚠上書き！もう一度で開始', startCalib);
 $('calibBtn').onclick=()=>{ if(calibrating) finishCalibrate(); else armedCalibStart(); };
