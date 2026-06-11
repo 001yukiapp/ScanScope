@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.11.1';
+    const _V = 'd0.12.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.11.1</p>
+    <p style="color:#555;">d0.12.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -734,7 +734,7 @@ function startRecord(){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
             const pn=d.pnpRms!=null?` ${d.method}:${d.pnpRms.toFixed(1)}px`:` ${d.method||''}${d.pnpFail!=null?`(P棄${d.pnpFail.toFixed(1)}px)`:''}`;
-            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
+            recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd}${d.dist!=null?` 距離:${d.dist}cm`:''} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
             recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
@@ -808,12 +808,19 @@ function tryAutoConfirm(toe){
 
 // ===== 測定（トー算出）=====
 let measuring=false, measureSamples=[], diagSamples=[];
+// グループの推定距離（検出タグの|pose.t|中央値・タグサイズ設定に基づく）
+function grpDist(list){
+    const ds=list.filter(d=>d.pose&&d.pose.t).map(d=>Math.hypot(d.pose.t[0],d.pose.t[1],d.pose.t[2])).sort((x,y)=>x-y);
+    if(!ds.length) return null;
+    return Math.round(ds[Math.floor(ds.length/2)]*100);
+}
 function doMeasure(groups){
     const a=fuseBody('A',groups.A);
     const b=fuseBody('B',groups.B);
+    const dA=grpDist(groups.A), dB=grpDist(groups.B);
 
-    $('s-a').textContent = `${groups.A.length} 面 / 学習${Object.keys(model.A.P||{}).length}`;
-    $('s-b').textContent = `${groups.B.length} 面 / 学習${Object.keys(model.B.P||{}).length}`;
+    $('s-a').textContent = `${groups.A.length} 面 / 学習${Object.keys(model.A.P||{}).length}${dA!=null?` / ${dA}cm`:''}`;
+    $('s-b').textContent = `${groups.B.length} 面 / 学習${Object.keys(model.B.P||{}).length}${dB!=null?` / ${dB}cm`:''}`;
     $('s-status').innerHTML = calibrating
         ? '<span class="mid">キャリブ中…ターゲットを回す</span>'
         : `<span class="good">測定中</span> FPS${fps}`;
@@ -830,10 +837,11 @@ function doMeasure(groups){
         autoToeHist=[];                                    // 片側のみ→自動確定バッファリセット
         // 片側だけ → 単体診断モード（1個のドデカで視点バイアスを直接測る）
         const g=a?'A':(b?'B':null), est=a||b;
+        $('graph-wrap').style.display='none';              // 単体診断ではトーグラフは空＝目隠しなので消す
         if(est){
             const st=bodyStability(g);
             const viewDiff = refPose ? angBetween(refPose, est.R) : null;
-            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms,pnpFail:est.pnpFail};
+            _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms,pnpFail:est.pnpFail,dist:g==='A'?dA:dB};
             if(viewDiff!=null){
                 $('lbl-main').textContent='視点差分＝カメラ角度を変えたときの本体姿勢ずれ（1°未満=バイアスなし）';
                 $('s-delta').textContent=`${viewDiff.toFixed(2)}°`;
@@ -861,6 +869,7 @@ function doMeasure(groups){
     }
     const toe=toeYawBetween(a.R,b.R);
     const delta=baseline!=null?toe-baseline:null;
+    $('graph-wrap').style.display='block';
     _lastEstForRecord={mode:'dual',facesA:a.faces,residA:a.residual,facesB:b.faces,residB:b.residual,toe,delta};
 
     // Δ＝変化量（ゼロ点基準）
