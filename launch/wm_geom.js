@@ -259,8 +259,29 @@ function pickStableRotation(cands, thDeg, weights){
     return { R, support:bestW/totalW, spreadDeg:spread/best.length };
 }
 
-// --- コーナー再投影PnP（Gauss-Newton・6DoF）---
-// X: [[x,y,z]…] 本体系3D点 / uv: [[u,v]…] 観測px / K:{fx,fy,cx,cy}
+// --- 半径方向歪み（k1）込みの投影 ---
+// 正規化座標 x=Y0/Y2 に対し d=1+k1*r²、u=fx*x*d+cx。K.k1省略時は無歪み（従来互換）。
+// 戻り { u, v, x, y, r2, d, iz } （ヤコビアン計算用の中間値込み）
+function projectK(K, Y){
+    const iz=1/Y[2], x=Y[0]*iz, y=Y[1]*iz;
+    const k1=K.k1||0, r2=x*x+y*y, d=1+k1*r2;
+    return { u:K.fx*x*d+K.cx, v:K.fy*y*d+K.cy, x, y, r2, d, iz };
+}
+// du,dv の dY（カメラ系3D点）に対する偏微分（k1込み）
+function projJacY(K, p){
+    const k1=K.k1||0;
+    // du/dx=fx(d+2k1x²) du/dy=fx·x·2k1y / dv同様
+    const dudx=K.fx*(p.d+2*k1*p.x*p.x), dudy=K.fx*p.x*2*k1*p.y;
+    const dvdx=K.fy*p.y*2*k1*p.x,       dvdy=K.fy*(p.d+2*k1*p.y*p.y);
+    // dx/dY=[iz,0,-x·iz] dy/dY=[0,iz,-y·iz]
+    return {
+        du:[dudx*p.iz, dudy*p.iz, (-dudx*p.x-dudy*p.y)*p.iz],
+        dv:[dvdx*p.iz, dvdy*p.iz, (-dvdx*p.x-dvdy*p.y)*p.iz]
+    };
+}
+
+// --- コーナー再投影PnP（Gauss-Newton・6DoF・歪みk1対応）---
+// X: [[x,y,z]…] 本体系3D点 / uv: [[u,v]…] 観測px / K:{fx,fy,cx,cy,k1?}
 // R0,t0: 初期姿勢（Horn等から）。戻り { R, t, rmsPx, iters } | null
 function pnpRefine(X, uv, K, R0, t0, maxIters){
     let R=R0.map(r=>r.slice()), t=t0.slice();
@@ -274,12 +295,10 @@ function pnpRefine(X, uv, K, R0, t0, maxIters){
             const Z=matVec3(R,X[i]);
             const Y=[Z[0]+t[0], Z[1]+t[1], Z[2]+t[2]];
             if(Y[2]<1e-6) return null;
-            const iz=1/Y[2];
-            const ru=K.fx*Y[0]*iz+K.cx-uv[i][0];
-            const rv=K.fy*Y[1]*iz+K.cy-uv[i][1];
+            const p=projectK(K,Y);
+            const ru=p.u-uv[i][0], rv=p.v-uv[i][1];
             se+=ru*ru+rv*rv;
-            const du=[K.fx*iz, 0, -K.fx*Y[0]*iz*iz];
-            const dv=[0, K.fy*iz, -K.fy*Y[1]*iz*iz];
+            const {du,dv}=projJacY(K,p);
             // dY/dδw = -skew(Z)（左摂動 R←exp(δw)R）, dY/dδt = I
             const Jw=[[0,Z[2],-Z[1]],[-Z[2],0,Z[0]],[Z[1],-Z[0],0]];
             const Ju=[du[0]*Jw[0][0]+du[1]*Jw[1][0]+du[2]*Jw[2][0],
@@ -306,6 +325,147 @@ function pnpRefine(X, uv, K, R0, t0, maxIters){
         rms=newRms;
     }
     return { R, t, rmsPx:rms, iters:it };
+}
+
+// ===== 小規模BA: P（タグ位置）/ Q（タグ向き）/ k1（半径歪み）の交互最適化 =====
+// frames: [{ R,t（初期本体姿勢・カメラ系）, tags:[{id, uv:[[u,v]×4]}] }, ...]
+// model: { P:{id:[xyz]}, Q:{id:R3x3}, h:{id:タグ半辺(m)} }
+// K: {fx,fy,cx,cy,k1?}（k1はここから初期値・最適化後はret.k1）
+// 構造: ①各フレーム姿勢をpnpRefine ②各タグの(Q,P)を6DoF GN ③k1を1D最小二乗 を繰り返す。
+// スケールはタグ実寸hで固定されるためゲージ自由度なし。
+const TAG_CORNERS_LOCAL=h=>[[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+function baCorners(model, id){
+    const h=model.h[id], P=model.P[id], Q=model.Q[id];
+    return TAG_CORNERS_LOCAL(h).map(l=>{
+        const v=matVec3(Q,l);
+        return [P[0]+v[0], P[1]+v[1], P[2]+v[2]];
+    });
+}
+function baRms(frames, model, K){
+    let se=0, n=0;
+    for(const f of frames) for(const tg of f.tags){
+        if(!model.P[tg.id]||!model.Q[tg.id]) continue;
+        const Xc=baCorners(model, tg.id);
+        for(let k=0;k<4;k++){
+            const Z=matVec3(f.R,Xc[k]);
+            const p=projectK(K,[Z[0]+f.t[0],Z[1]+f.t[1],Z[2]+f.t[2]]);
+            se+=(p.u-tg.uv[k][0])**2+(p.v-tg.uv[k][1])**2; n++;
+        }
+    }
+    return n?Math.sqrt(se/n):Infinity;
+}
+// 1タグの(Q,P)をGauss-Newtonで精錬（全フレームのそのタグの観測を使用・姿勢は固定）
+function refineTagGeom(frames, model, K, id, maxIters){
+    let Q=model.Q[id].map(r=>r.slice()), P=model.P[id].slice();
+    const h=model.h[id], L=TAG_CORNERS_LOCAL(h);
+    for(let it=0; it<(maxIters||5); it++){
+        const H=Array.from({length:6},()=>new Array(6).fill(0));
+        const g=new Array(6).fill(0);
+        let n=0;
+        for(const f of frames){
+            const tg=f.tags.find(t=>String(t.id)===String(id));   // モデルキーは文字列・観測idは数値のことがある
+            if(!tg) continue;
+            for(let k=0;k<4;k++){
+                const Ql=matVec3(Q,L[k]);
+                const Xb=[P[0]+Ql[0], P[1]+Ql[1], P[2]+Ql[2]];
+                const Z=matVec3(f.R,Xb);
+                const Y=[Z[0]+f.t[0], Z[1]+f.t[1], Z[2]+f.t[2]];
+                if(Y[2]<1e-6) continue;
+                const p=projectK(K,Y);
+                const ru=p.u-tg.uv[k][0], rv=p.v-tg.uv[k][1];
+                const {du,dv}=projJacY(K,p);
+                // dY/dδw = Rf·(-skew(Ql))（Q←exp(δw)Q の左摂動）/ dY/dδP = Rf
+                const S=[[0,Ql[2],-Ql[1]],[-Ql[2],0,Ql[0]],[Ql[1],-Ql[0],0]]; // -skew(Ql)…符号はJw流儀に合わせ転置型
+                const J=[];
+                for(let a=0;a<3;a++){
+                    // 列a: Rf·S[:,a]
+                    const col=[f.R[0][0]*S[0][a]+f.R[0][1]*S[1][a]+f.R[0][2]*S[2][a],
+                               f.R[1][0]*S[0][a]+f.R[1][1]*S[1][a]+f.R[1][2]*S[2][a],
+                               f.R[2][0]*S[0][a]+f.R[2][1]*S[1][a]+f.R[2][2]*S[2][a]];
+                    J.push(col);
+                }
+                for(let a=0;a<3;a++){
+                    const col=[f.R[0][a], f.R[1][a], f.R[2][a]];
+                    J.push(col);
+                }
+                const Ju=J.map(c=>du[0]*c[0]+du[1]*c[1]+du[2]*c[2]);
+                const Jv=J.map(c=>dv[0]*c[0]+dv[1]*c[1]+dv[2]*c[2]);
+                for(let a=0;a<6;a++){
+                    g[a]+=Ju[a]*ru+Jv[a]*rv;
+                    for(let b=a;b<6;b++) H[a][b]+=Ju[a]*Ju[b]+Jv[a]*Jv[b];
+                }
+                n++;
+            }
+        }
+        if(n<8) return null;                                 // 2フレーム未満では解かない
+        for(let a=0;a<6;a++)for(let b=0;b<a;b++) H[a][b]=H[b][a];
+        for(let a=0;a<6;a++) H[a][a]+=1e-9;
+        const d=solveN(H, g.map(x=>-x));
+        if(!d) break;
+        Q=matMul3(expSO3([d[0],d[1],d[2]]), Q);
+        P=[P[0]+d[3], P[1]+d[4], P[2]+d[5]];
+        if(Math.hypot(d[0],d[1],d[2])<1e-6 && Math.hypot(d[3],d[4],d[5])<1e-7) break;
+    }
+    return { Q, P };
+}
+// k1の1次元最小二乗ステップ（他パラメータ固定）
+function refineK1(frames, model, K){
+    let num=0, den=0;
+    for(const f of frames) for(const tg of f.tags){
+        if(!model.P[tg.id]||!model.Q[tg.id]) continue;
+        const Xc=baCorners(model, tg.id);
+        for(let k=0;k<4;k++){
+            const Z=matVec3(f.R,Xc[k]);
+            const Y=[Z[0]+f.t[0], Z[1]+f.t[1], Z[2]+f.t[2]];
+            if(Y[2]<1e-6) continue;
+            const p=projectK(K,Y);
+            const ru=p.u-tg.uv[k][0], rv=p.v-tg.uv[k][1];
+            // du/dk1 = fx·x·r² / dv/dk1 = fy·y·r²
+            const ju=K.fx*p.x*p.r2, jv=K.fy*p.y*p.r2;
+            num+=ju*ru+jv*rv; den+=ju*ju+jv*jv;
+        }
+    }
+    return den>1e-9 ? (K.k1||0) - num/den : (K.k1||0);
+}
+// 本体: 交互最適化。戻り { P, Q, k1, rms0, rms, iters, frames:使用フレーム数 }
+function baRefine(framesIn, model0, K0, opts){
+    const o=opts||{};
+    const K={fx:K0.fx, fy:K0.fy, cx:K0.cx, cy:K0.cy, k1:K0.k1||0};
+    const model={ P:{}, Q:{}, h:model0.h };
+    for(const id in model0.P) model.P[id]=model0.P[id].slice();
+    for(const id in model0.Q) model.Q[id]=model0.Q[id].map(r=>r.slice());
+    // 観測にP/Q両方あるタグだけ残す
+    const frames=framesIn.map(f=>({ R:f.R.map(r=>r.slice()), t:f.t.slice(),
+        tags:f.tags.filter(tg=>model.P[tg.id]&&model.Q[tg.id]) }))
+        .filter(f=>f.tags.length>=2);
+    if(frames.length<5) return null;
+    const rms0=baRms(frames, model, K);
+    let it;
+    for(it=0; it<(o.iters||8); it++){
+        // ① 各フレームの姿勢
+        for(const f of frames){
+            const X=[], uv=[];
+            for(const tg of f.tags){
+                const Xc=baCorners(model, tg.id);
+                for(let k=0;k<4;k++){ X.push(Xc[k]); uv.push(tg.uv[k]); }
+            }
+            const r=pnpRefine(X, uv, K, f.R, f.t, 6);
+            if(r){ f.R=r.R; f.t=r.t; }
+        }
+        // ② k1（タグより先に推定: タグが歪みを吸収して局所解に落ちるのを防ぐ）
+        K.k1=refineK1(frames, model, K);
+        if(K.k1<-0.5||K.k1>0.5) K.k1=0;                      // 発散ガード
+        // ③ 各タグのQ/P（3フレーム以上で観測されたタグのみ）
+        for(const id in model.P){
+            const seen=frames.filter(f=>f.tags.some(tg=>String(tg.id)===String(id))).length;
+            if(seen<3) continue;
+            const r=refineTagGeom(frames, model, K, id, 4);
+            if(r){ model.Q[id]=r.Q; model.P[id]=r.P; }
+        }
+    }
+    const rms=baRms(frames, model, K);
+    if(!(rms<rms0)) return null;                             // 改善しなければ採用しない
+    return { P:model.P, Q:model.Q, k1:K.k1, rms0, rms, iters:it, frames:frames.length };
 }
 
 // --- 鏡像（z反転）---
@@ -338,7 +498,8 @@ function buildBody(ids, frames){
 }
 
 const api={ reconstruct, hornPose, hornPoseRobust, buildBody, chiralityResidual, mirrorPos, jacobiEigen4, quatToMat, solve3, dvec,
-    pnpRefine, expSO3, rotAngleDeg, avgRotGS, pickStableRotation, solveN, matMul3, matT3, matVec3 };
+    pnpRefine, expSO3, rotAngleDeg, avgRotGS, pickStableRotation, solveN, matMul3, matT3, matVec3,
+    projectK, baRefine, baRms, refineTagGeom, refineK1 };
 if(typeof module!=='undefined' && module.exports) module.exports=api;
 else root.WMGeom=api;
 

@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.20.1';
+    const _V = 'd0.21.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.20.1</p>
+    <p style="color:#555;">d0.21.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -112,6 +112,7 @@
         <button id="lockBtn" class="sec">視点ロック</button>
         <button id="recordBtn" class="sec">記録</button>
         <button id="detTestBtn" class="sec">検出安定</button>
+        <button id="baBtn" class="sec">精錬(0)</button>
         <button id="logCopyBtn" class="sec">ログ全コピー</button>
         <button id="saveModelBtn" class="sec">モデル保存</button>
         <button id="loadModelBtn" class="sec">復元</button>
@@ -126,7 +127,7 @@
     <div id="log-panel"></div>
 </div>
 
-<script src="./wm_geom.js?v=d091"></script>
+<script src="./wm_geom.js?v=d0210"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -191,7 +192,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; qObs[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; qObs[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; baObs[g.key]=[]; });
     renderGroupRows();
 }
 
@@ -402,9 +403,11 @@ function doCalibrate(groups){
     calibMoving=(still===false);                           // ガイド表示用
     if(still===false){ calibRejected++; return; }          // 動いている間は収集しない
     if(still===null) return;
+    let pushed=false;
     for(const g of GROUPS.map(g=>g.key)){
         const list=groups[g].filter(d=>d.pose&&d.pose.t);
         if(list.length<2) continue;                        // 距離を測るには2面以上
+        pushed=true;
         const fr={}, rr={};
         for(const d of list){
             fr[d.id]=d.pose.t;
@@ -417,13 +420,14 @@ function doCalibrate(groups){
         calibFrames[g].push(fr);
         calibRots[g].push(rr);
     }
+    if(pushed && ++_calibEvalN>=45){ _calibEvalN=0; try{ liveCalibEval(); }catch(e){} }
 }
 
 // キャリブ品質ゲート: 「完了したけど実は不良品」（欠3面なのに残差0.6mmで見かけ完璧、等）を
 // 完了させない。未達なら理由と対処を表示して収集継続。4秒以内の再押下で強制確定は可能。
-let calibIssueMsg=null, finishArm=0;
-function finishCalibrate(force){
-    // ===== 第1パス: 品質評価（モデルにはまだ書き込まない） =====
+let calibIssueMsg=null, finishArm=0, _calibEvalN=0;
+function assessCalib(){
+    // 品質評価（モデルには書き込まない）: 終了時ゲートとキャリブ中の常時評価の両方から使う
     const results=[], issues=[];
     for(const g of GROUPS.map(g=>g.key)){
         const frames=calibFrames[g];
@@ -479,6 +483,25 @@ function finishCalibrate(force){
         results.push({g, frames, pos, placed, failed, medRms, faceErr, feTh});
     }
     if(!results.length && !issues.length) issues.push('データ不足（静止の時間が短い）');
+    return {results, issues};
+}
+// キャリブ中の常時品質評価（収集45フレーム毎・doCalibrateから呼ぶ）:
+// 問題をライブでガイド表示し、全レンジ面が配置済み・整合OK・全面カウント達成なら自動完了
+function liveCalibEval(){
+    const {results, issues}=assessCalib();
+    calibIssueMsg=issues.length?issues.join(' / '):null;
+    if(issues.length || !results.length) return;
+    for(const r of results){
+        const grp=GROUPS.find(x=>x.key===r.g);
+        if(r.frames.length<120) return;                          // 量が足りるまで完了しない
+        if(r.placed.length < grp.idMax-grp.idMin+1) return;      // 全レンジ面が配置済みか
+        for(const id of r.placed) if((calibCount[r.g][id]||0)<CALIB_OK) return;
+    }
+    addLog('✅ 品質達成（全面配置・整合OK）→ キャリブを自動完了します');
+    finishCalibrate(false);
+}
+function finishCalibrate(force){
+    const {results, issues}=assessCalib();
     if(issues.length && !force){
         calibIssueMsg=issues.join(' / ');
         finishArm=performance.now()+4000;
@@ -601,6 +624,7 @@ function collectQ(g, dets, R, residual){
     for(let a=0;a<3;a++){ pb[a]/=nC; cb[a]/=nC; }
     const Rp=WMGeom.matVec3(R,pb);
     const tBody=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
+    baCollect(g, dets, R, tBody);                          // BA用観測（精錬ボタンで使用）
     for(const d of dets){
         if(!P[d.id]||!d.pose||!d.pose.R) continue;
         const obs=qObs[g][d.id]=qObs[g][d.id]||[];
@@ -620,6 +644,50 @@ function collectQ(g, dets, R, residual){
     }
     if(++qGoodFrames>=60){ qGoodFrames=0; refreshQ(g); }   // 約10秒ごとに再推定
 }
+// ===== BA（精錬）用の観測蓄積 =====
+// 静止視聴中の良フレームから、視点が既存と6°/6cm以上違うものだけ蓄積。
+// 「精錬」ボタンでP/Q/k1（レンズ歪み）を同時最適化する（wm_geom.baRefine）。
+// 効果的なデータ: 距離・角度に加えて「ターゲットが画面の中央/端」も変える（k1の可観測性）
+const baObs=Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
+const BA_MIN=12, BA_MAX=50;
+function baCollect(g, dets, R, t){
+    const arr=baObs[g];
+    if(arr.length>=BA_MAX) return;
+    for(const o of arr){
+        if(WMGeom.rotAngleDeg(o.R,R)<6 && Math.hypot(o.t[0]-t[0],o.t[1]-t[1],o.t[2]-t[2])<0.06) return;
+    }
+    arr.push({R:R.map(r=>r.slice()), t:t.slice(), tags:dets.map(d=>({id:d.id, uv:d.corners.map(c=>[c.x,c.y])}))});
+    $('baBtn').textContent=`精錬(${arr.length})`;
+}
+function resetBaObs(){ GROUPS.forEach(x=>{ baObs[x.key]=[]; }); $('baBtn').textContent='精錬(0)'; }
+$('baBtn').onclick=()=>{
+    const g=GROUPS.map(x=>x.key).sort((a,b)=>baObs[b].length-baObs[a].length)[0];
+    const frames=baObs[g];
+    if(frames.length<BA_MIN){
+        addLog(`精錬には${BA_MIN}視点必要（現在${frames.length}）。距離・角度・画面内の位置（中央/端寄り）を変えながら静止視聴で貯まります`);
+        return;
+    }
+    const btn=$('baBtn'); btn.textContent='計算中…'; btn.disabled=true;
+    setTimeout(()=>{
+        try{
+            const P=model[g].P||{};
+            const h=Object.fromEntries(Object.keys(P).map(id=>[id, tagSizeM(+id)/2]));
+            const r=WMGeom.baRefine(frames, {P, Q:model[g].Q||{}, h}, camK(), {iters:40});
+            if(!r){ addLog('❌ 精錬: 改善なし（視点の多様性不足の可能性。もっと別の角度・距離・画面位置で貯めて再実行）'); }
+            else{
+                model[g].P=r.P; model[g].Q=r.Q;
+                const Qs=model[g].Qs||{};
+                for(const id of Object.keys(r.Q)) Qs[id]=0.99;   // コーナー実測で精錬済み＝高信頼扱い
+                model[g].Qs=Qs; saveModel();
+                camK1=r.k1; localStorage.setItem('scanscope_k1', String(camK1));
+                GROUPS.forEach(x=>{ qAcc[x.key]={}; qObs[x.key]={}; pnpEma[x.key]={}; pnpView[x.key]={}; bodyHist[x.key].length=0; });
+                addLog(`✅ 精錬完了[${g}]: 再投影${r.rms0.toFixed(1)}→${r.rms.toFixed(1)}px・k1=${r.k1.toFixed(4)}・${r.frames}視点使用。「モデル保存」を推奨`);
+            }
+        }catch(e){ addLog('❌ 精錬エラー: '+e.message); }
+        btn.textContent=`精錬(${baObs[g].length})`; btn.disabled=false;
+    },50);
+};
+
 // 候補Qで直近標本のコーナー予測誤差（px・中央値）を出す。観測コーナーが正解データなので、
 // フリップ解・視点バイアス解はここで必ず大きい誤差になる
 function qPredErr(g, id, Qc){
@@ -683,9 +751,13 @@ function pnpDiagLog(dets, diag, tail){
 }
 
 const TAG_LOCAL=h=>[[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+// ===== カメラ内部パラメータ（k1=半径歪み・精錬ボタンで推定されlocalStorageに永続） =====
+let camK1=parseFloat(localStorage.getItem('scanscope_k1'))||0;
+function camK(){ return {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2, k1:camK1}; }
 function projPt(R,t,X){
-    const Y=WMGeom.matVec3(R,X), z=Y[2]+t[2];
-    return [1243*(Y[0]+t[0])/z+overlay.width/2, 1243*(Y[1]+t[1])/z+overlay.height/2];
+    const Y=WMGeom.matVec3(R,X);
+    const p=WMGeom.projectK(camK(), [Y[0]+t[0], Y[1]+t[1], Y[2]+t[2]]);
+    return [p.u, p.v];
 }
 // 観測コーナー順の解決: 予測投影と最も合う巡回シフト（順/逆×4巡回）を選ぶ
 // 戻り { arr, avg(px), ok }  okがfalseでもavgは診断用に返す
@@ -751,7 +823,7 @@ function fuseBody(g, list){
             if(!ord.ok){ ordErrSum+=ord.avg; ordErrN++; pnpDiag[d.id]=`順ズレ${ord.avg.toFixed(0)}px`; continue; }
             tags.push({id:d.id, Xc, uv:ord.arr});
         }
-        const K={fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2};
+        const K=camK();
         const runPnp=arr=>{
             const X=[],uv=[];
             for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
@@ -760,9 +832,9 @@ function fuseBody(g, list){
         const perTagRms=(arr,rf)=>arr.map(tg=>{
             let s=0;
             for(let k=0;k<4;k++){
-                const Y=WMGeom.matVec3(rf.R,tg.Xc[k]), z=Y[2]+rf.t[2];
-                const u=K.fx*(Y[0]+rf.t[0])/z+K.cx, v=K.fy*(Y[1]+rf.t[1])/z+K.cy;
-                s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
+                const Y=WMGeom.matVec3(rf.R,tg.Xc[k]);
+                const p=WMGeom.projectK(K, [Y[0]+rf.t[0], Y[1]+rf.t[1], Y[2]+rf.t[2]]);
+                s+=(p.u-tg.uv[k][0])**2+(p.v-tg.uv[k][1])**2;
             }
             return Math.sqrt(s/4);
         });
@@ -896,7 +968,7 @@ let _lastEstForRecord=null; // doMeasureから参照用
 // テスト条件ヘッダー: 記録ログの先頭に自動で埋め込む（この行群だけで条件が再現できる状態にする）
 function condHeader(){
     const lines=[];
-    lines.push(`[条件] APP:dodeca ${_V} モード:${mode} SW:${diagCfgStr()} 解像度:${overlay.width}x${overlay.height}`);
+    lines.push(`[条件] APP:dodeca ${_V} モード:${mode} SW:${diagCfgStr()} k1:${camK1.toFixed(4)} 解像度:${overlay.width}x${overlay.height}`);
     for(const g of GROUPS){
         const m=model[g.key]||{};
         const nP=Object.keys(m.P||{}).length, nQ=Object.keys(m.Q||{}).length;
@@ -1039,6 +1111,17 @@ function renderCalibGuide(groups){
     $('lbl-sub2').textContent=''; $('s-resid').textContent='';
 }
 
+// 測定の合否ステータス: 「今の数値は信用していいか」を一目で
+function verdictFor(est, gkey){
+    if(!est) return '<span class="bad">❌ ターゲットなし</span>';
+    if(est.residual>modelSpanMm(gkey)*0.035) return '<span class="bad">❌ モデル不一致→再キャリブ</span>';
+    if(est.method&&est.method.startsWith('PnP')){
+        const n=parseInt(est.method.slice(3))||0;
+        return n>=3 ? `<span class="good">✅ 測定OK（PnP${n}）</span>`
+                    : `<span class="mid">🟡 測定可（PnP${n}・タグ少）</span>`;
+    }
+    return '<span class="mid">⚠ 精度低下（PnP不発→下の指示）</span>';
+}
 function doMeasure(groups){
     const a=fuseBody('A',groups.A);
     const b=fuseBody('B',groups.B);
@@ -1064,6 +1147,7 @@ function doMeasure(groups){
         // 片側だけ → 単体診断モード（1個のドデカで視点バイアスを直接測る）
         const g=a?'A':(b?'B':null), est=a||b;
         $('graph-wrap').style.display='none';              // 単体診断ではトーグラフは空＝目隠しなので消す
+        $('s-status').innerHTML=`${verdictFor(est, g||'A')} FPS${fps}`;
         if(est){
             const st=bodyStability(g);
             const viewDiff = refPose ? angBetween(refPose, est.R) : null;
@@ -1096,6 +1180,10 @@ function doMeasure(groups){
     const toe=toeYawBetween(a.R,b.R);
     const delta=baseline!=null?toe-baseline:null;
     $('graph-wrap').style.display='block';
+    {
+        const aOK=a.method&&a.method.startsWith('PnP'), bOK=b.method&&b.method.startsWith('PnP');
+        $('s-status').innerHTML=`<span class="${aOK&&bOK?'good':'mid'}">${aOK&&bOK?'✅':'🟡'} トー測定 A:${aOK?'PnP':'中心'} B:${bOK?'PnP':'中心'}</span> FPS${fps}`;
+    }
     _lastEstForRecord={mode:'dual',facesA:a.faces,residA:a.residual,facesB:b.faces,residB:b.residual,toe,delta};
 
     // Δ＝変化量（ゼロ点基準）
@@ -1284,8 +1372,9 @@ function armedClick(btn, warnText, fn){
 }
 
 const startCalib=()=>{
-    calibrating=true; _calLast=null; calibRejected=0; calibIssueMsg=null; finishArm=0;
+    calibrating=true; _calLast=null; calibRejected=0; calibIssueMsg=null; finishArm=0; _calibEvalN=0;
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
+    resetBaObs();
     $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
     addLog('キャリブ開始: 回して→止める、の繰り返しで全面25/25緑＋半周（動いている間は自動で収集停止）');
 };
@@ -1306,6 +1395,7 @@ $('loadModelBtn').onclick=armedClick($('loadModelBtn'), '⚠上書き！もう�
         const b=JSON.parse(s);
         model=b.model; saveModel();
         GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; bodyHist[g.key].length=0; });
+        resetBaObs();
         addLog(`✅ モデルを復元しました（${b.at}保存分）`);
     }catch(e){ addLog('❌ 復元失敗: 保存データが壊れています'); }
 });
@@ -1331,6 +1421,7 @@ $('recordBtn').textContent='記録開始';
 $('resetBtn').onclick=armedClick($('resetBtn'), '⚠全消去！もう一度', ()=>{
     model=emptyModel(); saveModel();
     GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
+    resetBaObs();
     addLog('学習モデルを消去しました');
 });
 </script>

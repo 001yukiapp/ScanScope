@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.6.2';
+    const _V = 'a0.7.0';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.6.2</p>
+    <p style="color:#555;">a0.7.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -159,7 +159,7 @@
     <button id="copyResultBtn" class="green" style="margin-top:4px;">結果をコピー</button>
 </div>
 
-<script src="./wm_geom.js?v=d091"></script>
+<script src="./wm_geom.js?v=d0210"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -361,10 +361,15 @@ function localizeCamera(visibleFloor) {
 
 // ===== ホイール姿勢推定（Horn初期化→コーナーPnP・dodeca.htmlと同方式）=====
 const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+// レンズ歪みk1（dodeca.htmlの「精錬」で推定された値を共有・localStorage）
+let camK1=parseFloat(localStorage.getItem('scanscope_k1'))||0;
+function camK(){ return {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2, k1:camK1}; }
 function resolveCornerOrderA(Xc, obs, R, t){
+    const K=camK();
     const pred=Xc.map(x=>{
-        const Y=WMGeom.matVec3(R,x), z=Y[2]+t[2];
-        return [1243*(Y[0]+t[0])/z+overlay.width/2, 1243*(Y[1]+t[1])/z+overlay.height/2];
+        const Y=WMGeom.matVec3(R,x);
+        const p=WMGeom.projectK(K, [Y[0]+t[0], Y[1]+t[1], Y[2]+t[2]]);
+        return [p.u, p.v];
     });
     let best=null;
     for(let rev=0;rev<2;rev++){
@@ -409,7 +414,7 @@ function estimateWheelPose(wheelDets, cameraPose) {
             if (!ord) continue;
             tags.push({Xc, uv:ord});
         }
-        const K = {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2};
+        const K = camK();
         const run = arr => {
             const X=[],uv=[];
             for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
@@ -420,9 +425,9 @@ function estimateWheelPose(wheelDets, cameraPose) {
             const perTag = tags.map(tg=>{
                 let s=0;
                 for(let k=0;k<4;k++){
-                    const Y=WMGeom.matVec3(ref.R,tg.Xc[k]), z=Y[2]+ref.t[2];
-                    const u=K.fx*(Y[0]+ref.t[0])/z+K.cx, v=K.fy*(Y[1]+ref.t[1])/z+K.cy;
-                    s+=(u-tg.uv[k][0])**2+(v-tg.uv[k][1])**2;
+                    const Y=WMGeom.matVec3(ref.R,tg.Xc[k]);
+                    const p=WMGeom.projectK(K, [Y[0]+ref.t[0], Y[1]+ref.t[1], Y[2]+ref.t[2]]);
+                    s+=(p.u-tg.uv[k][0])**2+(p.v-tg.uv[k][1])**2;
                 }
                 return Math.sqrt(s/4);
             });
@@ -495,7 +500,7 @@ function toggleLock(){
     // テスト条件をログに固定（コピーしたログだけで条件が再現できるように）
     let fm=null; try{ fm=JSON.parse(localStorage.getItem('scanscope_floor_meta')); }catch(e){}
     const nP=bodyModel?Object.keys(bodyModel).length:0, nQ=bodyQ?Object.keys(bodyQ).length:0;
-    addLog(`[条件] APP:align4 ${_V} ターゲット:${target.label} タグ${target.size!=null?'側面55/上面80mm':$('tagSizeInput').value+'mm'} モデル${nP}面/向き${nQ}面 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
+    addLog(`[条件] APP:align4 ${_V} ターゲット:${target.label} タグ${target.size!=null?'側面55/上面80mm':$('tagSizeInput').value+'mm'} モデル${nP}面/向き${nQ}面 k1:${camK1.toFixed(4)} 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
     addLog('✅ 世界姿勢ロック（15フレーム平均）。各視点で静止→「視点記録」を押す。0.5°以内=視点バイアス相殺の実証。');
 }
 
