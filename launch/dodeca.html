@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.19.0';
+    const _V = 'd0.20.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.19.0</p>
+    <p style="color:#555;">d0.20.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -419,19 +419,19 @@ function doCalibrate(groups){
     }
 }
 
-function finishCalibrate(){
-    calibrating=false;
-    $('calibBtn').textContent='キャリブ開始';
-    $('calibBtn').className='warn';
-    let msg=[], faceMsgs=[];
+// キャリブ品質ゲート: 「完了したけど実は不良品」（欠3面なのに残差0.6mmで見かけ完璧、等）を
+// 完了させない。未達なら理由と対処を表示して収集継続。4秒以内の再押下で強制確定は可能。
+let calibIssueMsg=null, finishArm=0;
+function finishCalibrate(force){
+    // ===== 第1パス: 品質評価（モデルにはまだ書き込まない） =====
+    const results=[], issues=[];
     for(const g of GROUPS.map(g=>g.key)){
         const frames=calibFrames[g];
         if(frames.length<5) continue;                      // データ不足
         const idset=new Set(); frames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
         const ids=[...idset];
         const { pos, placed, failed }=WMGeom.buildBody(ids, frames);
-        if(placed.length<3){ msg.push(`${g}:復元失敗`); continue; }
-        model[g].P=pos;
+        if(placed.length<3){ issues.push(`${g}:復元失敗→2面以上を同時に・止めながら映す`); continue; }
         // 整合度：キャリブ各フレームのHorn残差(mm)の中央値（小さいほど剛体が綺麗に復元できた）
         const rmss=[];
         for(const fr of frames){ const fids=Object.keys(fr).filter(id=>pos[id]);
@@ -464,9 +464,41 @@ function finishCalibrate(){
             }
             if(errs.length){ errs.sort((x,y)=>x-y); faceErr[id]=errs[Math.floor(errs.length/2)]; }
         }
-        const feTh=Math.max(3, modelSpanMm(g)*0.03);
+        // スパンはこの場のposから計算（モデル未コミットのためmodelSpanMmは使えない）
+        let spanMm=0;
+        for(let i=0;i<allIds.length;i++) for(let j=i+1;j<allIds.length;j++){
+            const a=pos[allIds[i]], b=pos[allIds[j]];
+            const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])*1000; if(d>spanMm) spanMm=d;
+        }
+        const feTh=Math.max(3, spanMm*0.03);
+        // 品質チェック
+        if(failed.length) issues.push(`${g}:配置できない面 id${failed.join(',')}→その面を他の面2枚と一緒に・止めながら映す`);
+        const badF=allIds.filter(id=>faceErr[id]!=null&&faceErr[id]>feTh).sort((a,b)=>faceErr[b]-faceErr[a]);
+        if(badF.length) issues.push(`${g}:位置あいまい ${badF.map(id=>`id${id}(${faceErr[id].toFixed(0)}mm)`).join('・')}→その面を別の角度からも映す`);
+        if(medRms>spanMm*0.03) issues.push(`${g}:全体残差${medRms.toFixed(1)}mm→上下の角度も混ぜてもう1周`);
+        results.push({g, frames, pos, placed, failed, medRms, faceErr, feTh});
+    }
+    if(!results.length && !issues.length) issues.push('データ不足（静止の時間が短い）');
+    if(issues.length && !force){
+        calibIssueMsg=issues.join(' / ');
+        finishArm=performance.now()+4000;
+        addLog(`⚠ キャリブ品質未達: ${calibIssueMsg}`);
+        addLog('→ 指示どおり映してから再度「終了」。どうしても確定するなら4秒以内にもう一度（⚠強制確定）');
+        const btn=$('calibBtn'); btn.textContent='⚠強制確定';
+        setTimeout(()=>{ if(calibrating) btn.textContent='キャリブ終了'; }, 4100);
+        return;
+    }
+    // ===== 第2パス: コミット（タグ向き学習・メタ・保存） =====
+    calibrating=false; calibIssueMsg=null; finishArm=0;
+    $('calibBtn').textContent='キャリブ開始';
+    $('calibBtn').className='warn';
+    let msg=[], faceMsgs=[];
+    for(const r of results){
+        const {g, frames, pos, placed, failed, medRms, faceErr, feTh}=r;
+        model[g].P=pos;
+        const allIds=Object.keys(pos);
         const feStr=allIds.sort((a,b)=>+a-+b).map(id=>`id${id}:${faceErr[id]!=null?faceErr[id].toFixed(0)+(faceErr[id]>feTh?'⚠':''):'-'}`).join(' ');
-        faceMsgs.push(`[${g}] 面別整合mm: ${feStr}（⚠=${feTh.toFixed(0)}mm超→その面の収集不足・要再キャリブ）`);
+        faceMsgs.push(`[${g}] 面別整合mm: ${feStr}（⚠=${feTh.toFixed(0)}mm超）`);
         // タグ向き学習: R_tag_body = R_body_cam^T · R_tag_cam を全フレームから集め、
         // 凸形状の事前知識（タグ法線は本体重心から外向き）で重み付けして最大クラスタで確定。
         // flip解は法線が外向きから2×入射角ずれるため重みが落ち、クラスタのタイでも負ける。
@@ -997,7 +1029,9 @@ function renderCalibGuide(groups){
             else { msg='✅ 全面OK あと半周→終了'; cls='val good'; }
         }
     }
-    $('lbl-main').textContent=`キャリブガイド（各面${CALIB_OK}フレームでOK・止めた時だけ進む）`;
+    $('lbl-main').textContent=calibIssueMsg
+        ? `⚠ 品質未達: ${calibIssueMsg}`
+        : `キャリブガイド（各面${CALIB_OK}フレームでOK・止めた時だけ進む）`;
     const el=$('s-delta'); el.textContent=msg; el.className=cls;
     $('lbl-sub1').textContent=''; $('s-toe').textContent=''; $('s-toe-sd').textContent='';
     $('lbl-sub2').textContent=''; $('s-resid').textContent='';
@@ -1248,13 +1282,13 @@ function armedClick(btn, warnText, fn){
 }
 
 const startCalib=()=>{
-    calibrating=true; _calLast=null; calibRejected=0;
+    calibrating=true; _calLast=null; calibRejected=0; calibIssueMsg=null; finishArm=0;
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
     $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
     addLog('キャリブ開始: 回して→止める、の繰り返しで全面25/25緑＋半周（動いている間は自動で収集停止）');
 };
 const armedCalibStart=armedClick($('calibBtn'), '⚠上書き！もう一度で開始', startCalib);
-$('calibBtn').onclick=()=>{ if(calibrating) finishCalibrate(); else armedCalibStart(); };
+$('calibBtn').onclick=()=>{ if(calibrating) finishCalibrate(performance.now()<finishArm); else armedCalibStart(); };
 
 // ===== モデル退避スロット（磨き済みモデルの保護） =====
 const bakKey=()=>MODES[mode].modelKey+'_bak';
