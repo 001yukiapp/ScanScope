@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.5.0';
+    const _V = 'a0.6.0';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.5.0</p>
+    <p style="color:#555;">a0.6.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -84,8 +84,8 @@
         <label style="color:#888;font-size:13px;">ターゲット</label>
         <select id="targetSelect">
             <option value="diag">ドデカ診断（ID2〜12）</option>
-            <option value="facetA">ファセットボス前（ID1〜7・55/80mm）</option>
-            <option value="facetB">ファセットボス後（ID11〜17・55/80mm）</option>
+            <option value="facetA">ファセットボス前（ID1〜8・55/80mm）</option>
+            <option value="facetB">ファセットボス後（ID9〜16・55/80mm）</option>
         </select>
     </div>
     <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
@@ -189,8 +189,8 @@ function loadFloorWorld(){
 // ===== ホイールターゲット定義（dodeca.htmlのMODES/GROUPSと対応）=====
 const TARGETS = {
     diag:   { label:'ドデカ診断',       idMin:2,  idMax:12, modelKey:'scanscope_diag_model',   group:'A' },
-    facetA: { label:'ファセットボス前', idMin:1,  idMax:7,  size:55, sizeById:{1:80},  modelKey:'scanscope_dodeca_model', group:'A' },
-    facetB: { label:'ファセットボス後', idMin:11, idMax:17, size:55, sizeById:{11:80}, modelKey:'scanscope_dodeca_model', group:'B' },
+    facetA: { label:'ファセットボス前', idMin:1, idMax:8,  size:55, sizeById:{1:80}, modelKey:'scanscope_dodeca_model', group:'A' },
+    facetB: { label:'ファセットボス後', idMin:9, idMax:16, size:55, sizeById:{9:80}, modelKey:'scanscope_dodeca_model', group:'B' },
 };
 let target = TARGETS.diag;          // カメラ起動時にtargetSelectから確定
 // ホイールタグの一辺（メートル）。diagは入力値、facetはTARGETS定義（側面55/上面80mm）

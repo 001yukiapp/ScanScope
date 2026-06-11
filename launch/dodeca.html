@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.12.0';
+    const _V = 'd0.13.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.12.0</p>
+    <p style="color:#555;">d0.13.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -52,14 +52,14 @@
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">ターゲット</label>
         <select id="modeSelect">
-            <option value="facet">ファセットボス（前1〜7/後11〜17）</option>
+            <option value="facet">ファセットボス（前1〜8/後9〜16）</option>
             <option value="diag">ドデカ診断（ID2〜12・単体）</option>
         </select>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">タグサイズ</label>
         <input id="tagSizeInput" type="number" value="36" min="5" max="200">
-        <span style="color:#888;font-size:13px;">mm（ドデカ診断用。ファセットボスは側面55/上面80mm固定・上面=ID1/11）</span>
+        <span style="color:#888;font-size:13px;">mm（ドデカ診断用。ファセットボスは側面55/上面80mm固定・上面=ID1/9・側面=2〜8/10〜16）</span>
     </div>
     <button id="startBtn">カメラ起動</button>
 </div>
@@ -140,9 +140,9 @@ let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 //        Bはダミー範囲（タグなし）→ 常に単体診断モードになる。
 //        学習モデルはモード別キーに保存（互いに上書きしない）。
 const MODES = {
-    // facetのタグサイズ: 側面55mm・上面80mm（上面=各ターゲットの先頭ID: 前=1・後=11 と取り決め）
-    facet: { groups:[ { key:'A', label:'前', idMin:1,  idMax:7,  size:55, sizeById:{1:80}  },
-                      { key:'B', label:'後', idMin:11, idMax:17, size:55, sizeById:{11:80} } ],
+    // facetのタグ構成（2026-06-11実機確定）: 上面=先頭ID（前=1・後=9・80mm）＋側面リング7面（55mm）
+    facet: { groups:[ { key:'A', label:'前', idMin:1, idMax:8,  size:55, sizeById:{1:80} },
+                      { key:'B', label:'後', idMin:9, idMax:16, size:55, sizeById:{9:80} } ],
              modelKey:'scanscope_dodeca_model' },
     diag:  { groups:[ { key:'A', label:'ドデカ', idMin:2,  idMax:12 },
                       { key:'B', label:'未使用', idMin:98, idMax:99 } ],
@@ -471,9 +471,24 @@ function diagCfgStr(){ const c=diagCfg(); return `[除${c.outlier?'ON':'OFF'} �
 // 常時収集し、60良フレームごとにQを再推定する。操作は「数方向から各5秒眺める」だけ。
 const qAcc=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
 let qGoodFrames=0;
+// モデルのスパン（学習済みタグ中心間の最大距離・mm）。
+// 残差ゲートはターゲットサイズに比例させる: ドデカ(スパン80mm)で従来の5mm相当、
+// ファセットボス(スパン230mm)で約14mm。固定5mmだとボスでは正常残差(6〜7mm)でも
+// 永遠に学習が始まらない（2026-06-11実機で発覚）。
+function modelSpanMm(g){
+    const P=model[g].P||{}; const ids=Object.keys(P);
+    let s=0;
+    for(let i=0;i<ids.length;i++) for(let j=i+1;j<ids.length;j++){
+        const a=P[ids[i]], b=P[ids[j]];
+        const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
+        if(d>s) s=d;
+    }
+    return s*1000;
+}
 function collectQ(g, dets, R, residual){
     if(calibrating) return;
-    if(dets.length<4 || residual>5) return;                // 本体姿勢が信頼できるフレームのみ
+    const gate=Math.max(5, modelSpanMm(g)*0.0625);         // 本体姿勢が信頼できるフレームのみ（サイズ比例）
+    if(dets.length<4 || residual>gate) return;
     const P=model[g].P||{}; const pids=Object.keys(P);
     if(pids.length<3) return;
     const cen=[0,0,0];
@@ -556,7 +571,7 @@ function fuseBody(g, list){
     const sol=cfg.outlier?WMGeom.hornPoseRobust(bp, cp, ws):WMGeom.hornPose(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
-    if(cfg.outlier&&residual>8) return null;               // 残差8mm超は品質不足で棄却
+    if(cfg.outlier&&residual>Math.max(8,modelSpanMm(g)*0.1)) return null; // 品質不足の棄却（サイズ比例・ドデカで従来の8mm相当）
     collectQ(g, dets, sol.R, residual);                    // タグ向きのオンライン学習（静止フレームから）
     let R=sol.R, method='中心', pnpRms=null, pnpFail=null;
 
