@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.13.0';
+    const _V = 'd0.14.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.13.0</p>
+    <p style="color:#555;">d0.14.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -188,7 +188,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; });
     renderGroupRows();
 }
 
@@ -367,6 +367,9 @@ function checkFrozen(gray){
 // タグ向き(Q)はコーナーPnP用に別途学習: 候補(R+asol)を集めて最大クラスタで確定（flip解は少数派に落ちる）。
 let calibFrames = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
 let calibRots   = Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
+// キャリブ中の面別収集数（枠の色のライブ表示用。CALIB_OKフレーム集まった面から緑になる）
+const CALIB_OK=25;
+let calibCount = Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
 function doCalibrate(groups){
     for(const g of GROUPS.map(g=>g.key)){
         const list=groups[g].filter(d=>d.pose&&d.pose.t);
@@ -374,6 +377,7 @@ function doCalibrate(groups){
         const fr={}, rr={};
         for(const d of list){
             fr[d.id]=d.pose.t;
+            calibCount[g][d.id]=(calibCount[g][d.id]||0)+1;
             const cands=[];
             if(d.pose.R) cands.push(d.pose.R);
             if(d.pose.asol&&d.pose.asol.R) cands.push(d.pose.asol.R);
@@ -451,7 +455,7 @@ function finishCalibrate(){
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
 }
 
 // ===== 本体姿勢推定（位置ベースHorn初期化 → コーナー再投影PnP）=====
@@ -940,12 +944,20 @@ function drawGraph(){
 // ===== 描画 =====
 function drawTag(d){
     const c=d.corners, g=groupOf(d.id);
-    const learned = g && ((model[g]||{}).P||{})[d.id];
-    ctx.strokeStyle = learned ? '#34d058' : '#ff9500';  // 学習済=緑, 未学習=橙
+    let ok, label=`${g}:${d.id}`;
+    if(calibrating){
+        // キャリブ中: 収集が足りた面から緑（全面緑→終了していい合図）。ラベルに進捗
+        const n=(g&&calibCount[g][d.id])||0;
+        ok = n>=CALIB_OK;
+        label += ` ${Math.min(n,CALIB_OK)}/${CALIB_OK}`;
+    } else {
+        ok = !!(g && ((model[g]||{}).P||{})[d.id]);      // 学習済=緑, 未学習=橙
+    }
+    ctx.strokeStyle = ok ? '#34d058' : '#ff9500';
     ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
     for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
-    ctx.fillStyle=learned?'#34d058':'#ff9500'; ctx.font='bold 13px -apple-system';
-    ctx.fillText(`${g}:${d.id}`, c[0].x+4, c[0].y-4);
+    ctx.fillStyle = ok ? '#34d058' : '#ff9500'; ctx.font='bold 13px -apple-system';
+    ctx.fillText(label, c[0].x+4, c[0].y-4);
 }
 
 // ===== 測定モード（5秒・中央値+MAD）=====
@@ -1028,7 +1040,7 @@ $('modeSelect').onchange=e=>applyMode(e.target.value);
 $('startBtn').onclick=()=>init();
 $('calibBtn').onclick=()=>{
     if(!calibrating){
-        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; });
+        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
         $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
         addLog('キャリブ開始: A・Bを順に回して全面を見せる');
     } else finishCalibrate();
