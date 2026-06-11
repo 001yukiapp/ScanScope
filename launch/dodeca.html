@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.16.0';
+    const _V = 'd0.17.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.16.0</p>
+    <p style="color:#555;">d0.17.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -376,7 +376,7 @@ let calibCount = Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
 // 静止した瞬間だけ収集する＝「コマ送り」の自動化。タグ中心の画面速度の中央値で判定。
 // 60px/s: 手ブレ（10〜30px/s）と回転中（200px/s前後）を分ける閾値
 const CALIB_MOVE_PXS=60;
-let _calLast=null, calibRejected=0;
+let _calLast=null, calibRejected=0, calibMoving=false;
 function frameStill(groups){
     const now=performance.now();
     const centers={};
@@ -398,6 +398,7 @@ function frameStill(groups){
 }
 function doCalibrate(groups){
     const still=frameStill(groups);
+    calibMoving=(still===false);                           // ガイド表示用
     if(still===false){ calibRejected++; return; }          // 動いている間は収集しない
     if(still===null) return;
     for(const g of GROUPS.map(g=>g.key)){
@@ -633,6 +634,16 @@ function refreshQ(g){
     }
 }
 
+// PnP不発・棄却時に全タグの脱落理由を出す診断ログ（5秒に1回）
+// 理由: Q未学習 / 支持○%低 / 順ズレ○px（コーナー対応付け失敗）/ 外れ除外 / ○px（最終残差）
+function pnpDiagLog(dets, diag, tail){
+    const now=performance.now();
+    if(window._pnpLogT && now-window._pnpLogT<=5000) return;
+    window._pnpLogT=now;
+    const ids=dets.map(d=>d.id).sort((a,b)=>a-b);
+    addLog(`PnP診断[${tail}] ${ids.map(id=>`id${id}:${diag[id]||'?'}`).join(' ')}`);
+}
+
 const TAG_LOCAL=h=>[[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
 function projPt(R,t,X){
     const Y=WMGeom.matVec3(R,X), z=Y[2]+t[2];
@@ -681,11 +692,11 @@ function fuseBody(g, list){
         const Rp=WMGeom.matVec3(R,pb);
         const t0=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
         const Qs=model[g].Qs||{};
-        const tags=[];
+        const tags=[], pnpDiag={};                          // pnpDiag: タグ別の脱落理由（診断ログ用）
         let qVis=0, ordErrSum=0, ordErrN=0;                 // PnP前段の診断カウンタ
         for(const d of dets){
-            if(!Q[d.id]) continue;                          // 向き未学習タグはPnP対象外
-            if(Qs[d.id]!=null && Qs[d.id]<0.25) continue;   // 低支持率の向きは使わない
+            if(!Q[d.id]){ pnpDiag[d.id]='Q未学習'; continue; }   // 向き未学習タグはPnP対象外
+            if(Qs[d.id]!=null && Qs[d.id]<0.25){ pnpDiag[d.id]=`支持${Math.round(Qs[d.id]*100)}%低`; continue; } // 低支持率の向きは使わない
             qVis++;
             const hh=tagSizeM(d.id)/2;
             const Xc=TAG_LOCAL(hh).map(l=>{
@@ -694,7 +705,7 @@ function fuseBody(g, list){
             });
             const obs=d.corners.map(c=>[c.x,c.y]);
             const ord=resolveCornerOrder(Xc, obs, R, t0);
-            if(!ord.ok){ ordErrSum+=ord.avg; ordErrN++; continue; }
+            if(!ord.ok){ ordErrSum+=ord.avg; ordErrN++; pnpDiag[d.id]=`順ズレ${ord.avg.toFixed(0)}px`; continue; }
             tags.push({id:d.id, Xc, uv:ord.arr});
         }
         const K={fx:1243,fy:1243,cx:overlay.width/2,cy:overlay.height/2};
@@ -724,19 +735,19 @@ function fuseBody(g, list){
                 if(!r2 || r2.rmsPx>=ref.rmsPx) break;
                 ref=r2; keepTags=keep; used=keep.length;
             }
+            const ptFin=perTagRms(keepTags, ref);
+            keepTags.forEach((t,i)=>pnpDiag[t.id]=`${ptFin[i].toFixed(0)}px`);
+            tags.forEach(t=>{ if(!pnpDiag[t.id]) pnpDiag[t.id]='外れ除外'; });
             // 受け入れ: 20px未満（仮ゲート。系統誤差16〜18pxの正体調査中のため15pxから緩和し、
             // PnP姿勢の実品質をP2/P3で実測する。系統誤差が全タグ一様なら姿勢への影響は小さい想定）
             if(ref.rmsPx<20){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
             else {
                 pnpFail=ref.rmsPx;                           // 棄却理由を可視化
-                // タグ別内訳を5秒に1回ログ（どのタグの向きが悪いか特定用）
-                const now=performance.now();
-                if(!window._pnpLogT || now-window._pnpLogT>5000){
-                    window._pnpLogT=now;
-                    const pt=perTagRms(keepTags, ref);
-                    addLog(`PnP棄却${ref.rmsPx.toFixed(0)}px 内訳: ${keepTags.map((t,i)=>`id${t.id}:${pt[i].toFixed(0)}px`).join(' ')}`);
-                }
+                pnpDiagLog(dets, pnpDiag, `棄却${ref.rmsPx.toFixed(0)}px>ゲート20`);
             }
+        } else {
+            tags.forEach(t=>{ if(!pnpDiag[t.id]) pnpDiag[t.id]='順OK(相方不足)'; });
+            pnpDiagLog(dets, pnpDiag, '対応タグ2枚未満で不実行');
         }
         // PnPが走らなかった場合の理由を表示（Q=向きあり可視タグ / 順=対応付け成功）
         if(method==='中心' && pnpFail==null){
@@ -927,6 +938,36 @@ function grpDist(list){
     if(!ds.length) return null;
     return Math.round(ds[Math.floor(ds.length/2)]*100);
 }
+// キャリブ中の操作ガイド: 距離（タグpx）・動き・未収集面を画面に指示する
+function renderCalibGuide(groups){
+    const g=GROUPS.find(x=>groups[x.key].length>0)
+          ||GROUPS.find(x=>Object.keys(calibCount[x.key]).length>0)
+          ||GROUPS[0];
+    const list=groups[g.key];
+    let msg, cls='val mid';
+    if(!list.length){ msg='ターゲットを映して'; }
+    else{
+        const pxs=list.map(d=>tagPx(d)).sort((x,y)=>x-y);
+        const mpx=pxs[Math.floor(pxs.length/2)];
+        if(mpx<80) msg='⬆ もっと近づいて';
+        else if(mpx>230) msg='⬇ 少し離れて';
+        else if(calibMoving) msg='⏸ 止めると収集が進む';
+        else{
+            const remain=[];
+            for(let i=g.idMin;i<=g.idMax;i++){
+                const n=calibCount[g.key][i]||0;
+                if(n<CALIB_OK) remain.push(`id${i}:${n}`);
+            }
+            if(remain.length) msg=`見せて→ ${remain.slice(0,3).join(' ')}${remain.length>3?` 他${remain.length-3}面`:''}`;
+            else { msg='✅ 全面OK あと半周→終了'; cls='val good'; }
+        }
+    }
+    $('lbl-main').textContent=`キャリブガイド（各面${CALIB_OK}フレームでOK・止めた時だけ進む）`;
+    const el=$('s-delta'); el.textContent=msg; el.className=cls;
+    $('lbl-sub1').textContent=''; $('s-toe').textContent=''; $('s-toe-sd').textContent='';
+    $('lbl-sub2').textContent=''; $('s-resid').textContent='';
+}
+
 function doMeasure(groups){
     const a=fuseBody('A',groups.A);
     const b=fuseBody('B',groups.B);
@@ -938,6 +979,7 @@ function doMeasure(groups){
         ? '<span class="mid">キャリブ中…ターゲットを回す</span>'
         : `<span class="good">測定中</span> FPS${fps}`;
     $('lbl-mode').textContent = calibrating ? 'モード（キャリブ中）' : 'モード（FPS=画像認識頻度）';
+    if(calibrating){ renderCalibGuide(groups); _lastEstForRecord=null; return; }
 
     // 単体診断：本体姿勢の時間ブレを追跡（片側だけ映っていても回す）
     // 遅延クリア：短い遮蔽でヒストリを保持し、復帰直後バイアスを軽減
