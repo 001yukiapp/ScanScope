@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.6.1';
+    const _V = 'a0.6.2';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.6.1</p>
+    <p style="color:#555;">a0.6.2</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -434,7 +434,7 @@ function estimateWheelPose(wheelDets, cameraPose) {
             }
             // 受け入れ仮ゲート: タグ見かけサイズ比例（dodeca d0.18.1と同方式・20px×タグpx/100・20〜40px）
             const psG=valid.map(d=>tagPx(d)).sort((x,y)=>x-y);
-            const gatePx=Math.min(40, Math.max(20, 20*psG[Math.floor(psG.length/2)]/100));
+            const gatePx=Math.min(45, Math.max(20, 25*psG[Math.floor(psG.length/2)]/100));
             if(ref.rmsPx<gatePx){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
         }
     }

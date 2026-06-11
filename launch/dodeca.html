@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.20.0';
+    const _V = 'd0.20.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.20.0</p>
+    <p style="color:#555;">d0.20.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -785,8 +785,10 @@ function fuseBody(g, list){
             // 系統誤差（レンズ歪み等）のpxはタグの画面サイズに比例するため、固定20pxは
             // 大タグのボスにはドデカの15pxより実質厳しかった。ドデカ(〜100px)では従来どおり20px。
             // 本ゲートは仮通し用＝姿勢の実品質はP2/P3(F2/F3)で判定する
+            // 係数25: 系統誤差の床（ドデカ16〜18px・ボス〜24px=タグサイズ比例）を通し、
+            // ゴミ姿勢（フリップ・壊れQ=50px以上）だけ弾く。床に対し1px差で落ち続けた実機データより
             const psG=dets.map(d=>tagPx(d)).sort((x,y)=>x-y);
-            const gatePx=Math.min(40, Math.max(20, 20*psG[Math.floor(psG.length/2)]/100));
+            const gatePx=Math.min(45, Math.max(20, 25*psG[Math.floor(psG.length/2)]/100));
             if(ref.rmsPx<gatePx){
                 R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`;
                 keepTags.forEach(t=>pnpDiag[t.id]='✓'+pnpDiag[t.id]);   // 採用タグの印（枠ラベル用）
