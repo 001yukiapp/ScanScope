@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.21.0';
+    const _V = 'd0.22.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,11 +44,13 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.21.0</p>
+    <p style="color:#555;">d0.22.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       ① 各ターゲットを回してキャリブ<br>
-       ② 調整前に「ゼロ点設定」<br>
-       ③ 調整後に測定 → Δが変化量</p>
+       ① 「キャリブ開始」→ ターゲットを<b>回して→止める</b>の繰り返し<br>
+       　（画面の指示に従えば<b>自動で完了</b>します）<br>
+       ② 上部に<b>✅測定OK</b>が出たら、調整前に「ゼロ点設定」<br>
+       ③ 調整後にΔを読む（=変化量）<br><br>
+       <span style="color:#888;font-size:12px;">⚠が出たら画面の指示どおりに直せばOK。<br>細かいツールは「詳細」ボタンの中。</span></p>
     <div style="display:flex;align-items:center;gap:8px;">
         <label style="color:#888;font-size:13px;">ターゲット</label>
         <select id="modeSelect">
@@ -73,7 +75,7 @@
     <div id="panel">
         <div class="row"><span class="lbl" id="lbl-mode">モード</span><span class="val" id="s-status">-</span></div>
         <div id="group-rows"></div>
-        <div class="row" style="margin-top:2px;">
+        <div class="row" style="margin-top:2px;" id="row-sw">
             <span class="lbl" style="font-size:10px;">診断SW（切替でブレ履歴リセット）</span>
             <span style="font-size:11px;display:flex;gap:10px;color:#ccc;">
                 <label><input type="checkbox" id="swOutlier">除去</label>
@@ -108,16 +110,19 @@
     <div id="controls">
         <button id="calibBtn" class="warn">キャリブ開始</button>
         <button id="zeroBtn">ゼロ点設定</button>
-        <button id="measureBtn">測定5秒</button>
-        <button id="lockBtn" class="sec">視点ロック</button>
-        <button id="recordBtn" class="sec">記録</button>
-        <button id="detTestBtn" class="sec">検出安定</button>
-        <button id="baBtn" class="sec">精錬(0)</button>
-        <button id="logCopyBtn" class="sec">ログ全コピー</button>
-        <button id="saveModelBtn" class="sec">モデル保存</button>
-        <button id="loadModelBtn" class="sec">復元</button>
         <button id="zeroClrBtn" class="sec">ゼロ解除</button>
-        <button id="resetBtn" class="sec">学習消去</button>
+        <button id="uiAdvBtn" class="sec">詳細 ▸</button>
+        <span id="adv-btns" style="display:contents;">
+            <button id="measureBtn" class="sec">測定5秒</button>
+            <button id="lockBtn" class="sec">視点ロック</button>
+            <button id="recordBtn" class="sec">記録</button>
+            <button id="detTestBtn" class="sec">検出安定</button>
+            <button id="baBtn" class="sec">精錬(0)</button>
+            <button id="logCopyBtn" class="sec">ログ全コピー</button>
+            <button id="saveModelBtn" class="sec">モデル保存</button>
+            <button id="loadModelBtn" class="sec">復元</button>
+            <button id="resetBtn" class="sec">学習消去</button>
+        </span>
     </div>
 
     <div id="log-header" style="position:absolute;bottom:162px;left:10px;right:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:0 4px 2px;">
@@ -888,6 +893,7 @@ function fuseBody(g, list){
                 help=worst.length
                     ? `PnPの足かせ: ${worst.map(id=>`id${id}(${Math.round(e[id])}px)`).join('・')} → その面を中央・正面気味で30秒静止`
                     : '向き学習待ち: 数方向から各30秒静止視聴';
+                if(baObs[g].length>=BA_MIN) help+=`／観測${baObs[g].length}視点あり→「精錬」で改善見込み（詳細▸内）`;
             }
         }
         // PnPが走らなかった場合の理由を表示（Q=向きあり可視タグ / 順=対応付け成功）
@@ -1388,6 +1394,17 @@ $('saveModelBtn').onclick=()=>{
     localStorage.setItem(bakKey(), JSON.stringify({at, model}));
     addLog(`✅ モデルを退避スロットへ保存（${at}）。「復元」でいつでも戻せます`);
 };
+// ===== かんたん/詳細UI =====
+// 通常はキャリブ・ゼロ点・ゼロ解除＋自動ガイドだけで完結。診断ツールは「詳細」に格納
+let uiAdv=localStorage.getItem('scanscope_ui_adv')==='1';
+function applyUiMode(){
+    $('adv-btns').style.display=uiAdv?'contents':'none';
+    $('row-sw').style.display=uiAdv?'':'none';
+    $('uiAdvBtn').textContent=uiAdv?'詳細 ▾':'詳細 ▸';
+}
+$('uiAdvBtn').onclick=()=>{ uiAdv=!uiAdv; localStorage.setItem('scanscope_ui_adv', uiAdv?'1':'0'); applyUiMode(); };
+applyUiMode();
+
 $('loadModelBtn').onclick=armedClick($('loadModelBtn'), '⚠上書き！もう一度', ()=>{
     const s=localStorage.getItem(bakKey());
     if(!s){ addLog('退避スロットが空です（先に「モデル保存」を押す）'); return; }

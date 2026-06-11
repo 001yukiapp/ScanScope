@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.7.0';
+    const _V = 'a0.8.0';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.7.0</p>
+    <p style="color:#555;">a0.8.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -364,6 +364,15 @@ const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
 // レンズ歪みk1（dodeca.htmlの「精錬」で推定された値を共有・localStorage）
 let camK1=parseFloat(localStorage.getItem('scanscope_k1'))||0;
 function camK(){ return {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2, k1:camK1}; }
+// PnP不発・棄却の理由を全タグ分ログ（5秒に1回・dodecaのPnP診断と同形式）
+function a4DiagLog(diag, tail){
+    const now=performance.now();
+    if(window._a4LogT && now-window._a4LogT<=5000) return;
+    window._a4LogT=now;
+    const ids=Object.keys(diag).sort((a,b)=>+a-+b);
+    if(!ids.length) return;
+    addLog(`PnP診断[${tail}] ${ids.map(id=>`id${id}:${diag[id]}`).join(' ')}`);
+}
 function resolveCornerOrderA(Xc, obs, R, t){
     const K=camK();
     const pred=Xc.map(x=>{
@@ -402,17 +411,17 @@ function estimateWheelPose(wheelDets, cameraPose) {
         const pb = centroid3(P), cb = centroid3(C);
         const Rp = WMGeom.matVec3(Rcam, pb);
         const t0 = [cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
-        const tags = [];
+        const tags = [], aDiag = {};                       // aDiag: タグ別の脱落理由（診断ログ）
         for (const d of valid) {
             const id = String(d.id), q = bodyQ[id];
-            if (!q) continue;
-            if (bodyQs && bodyQs[id]!=null && bodyQs[id]<0.25) continue;
+            if (!q){ aDiag[d.id]='Q未学習'; continue; }
+            if (bodyQs && bodyQs[id]!=null && bodyQs[id]<0.25){ aDiag[d.id]='支持低'; continue; }
             const p0 = bodyModel[id];
             const hh = wheelTagSizeM(d.id)/2;
             const Xc = TAG_LOCAL(hh).map(l=>{ const v=WMGeom.matVec3(q,l); return [p0[0]+v[0],p0[1]+v[1],p0[2]+v[2]]; });
             const ord = resolveCornerOrderA(Xc, d.corners.map(c=>[c.x,c.y]), Rcam, t0);
-            if (!ord) continue;
-            tags.push({Xc, uv:ord});
+            if (!ord){ aDiag[d.id]='順ズレ'; continue; }
+            tags.push({id:d.id, Xc, uv:ord});
         }
         const K = camK();
         const run = arr => {
@@ -437,10 +446,14 @@ function estimateWheelPose(wheelDets, cameraPose) {
                 const r2=run(keep);
                 if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; }
             }
-            // 受け入れ仮ゲート: タグ見かけサイズ比例（dodeca d0.18.1と同方式・20px×タグpx/100・20〜40px）
+            // 受け入れ仮ゲート: タグ見かけサイズ比例（dodecaと同方式・25px×タグpx/100・20〜45px）
             const psG=valid.map(d=>tagPx(d)).sort((x,y)=>x-y);
             const gatePx=Math.min(45, Math.max(20, 25*psG[Math.floor(psG.length/2)]/100));
             if(ref.rmsPx<gatePx){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+            else a4DiagLog(aDiag, `棄却${ref.rmsPx.toFixed(0)}px>ゲート${gatePx.toFixed(0)}`);
+        } else {
+            tags.forEach(t=>{ if(!aDiag[t.id]) aDiag[t.id]='順OK(相方不足)'; });
+            a4DiagLog(aDiag, '対応タグ2枚未満で不実行');
         }
     }
 
