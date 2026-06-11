@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.18.1';
+    const _V = 'd0.19.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.18.1</p>
+    <p style="color:#555;">d0.19.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -191,7 +191,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; qObs[g.key]={}; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; qObs[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
     renderGroupRows();
 }
 
@@ -551,6 +551,9 @@ function modelSpanMm(g){
 }
 // Q更新の答え合わせ用: 直近の実フレーム標本（コーナー観測＋本体姿勢）を面別に保持
 const qObs=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
+// PnP不調の主因提示用: タグ別残差のEMAと直近診断（枠ラベル・メイン表示に出す）
+const pnpEma=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
+const pnpView=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
 function collectQ(g, dets, R, residual){
     if(calibrating) return;
     const gate=Math.max(5, modelSpanMm(g)*0.0625);         // 本体姿勢が信頼できるフレームのみ（サイズ比例）
@@ -690,7 +693,7 @@ function fuseBody(g, list){
     const residual=sol.rms*1000;
     if(cfg.outlier&&residual>Math.max(8,modelSpanMm(g)*0.1)) return null; // 品質不足の棄却（サイズ比例・ドデカで従来の8mm相当）
     collectQ(g, dets, sol.R, residual);                    // タグ向きのオンライン学習（静止フレームから）
-    let R=sol.R, method='中心', pnpRms=null, pnpFail=null;
+    let R=sol.R, method='中心', pnpRms=null, pnpFail=null, help=null;
 
     if(cfg.pnp){
         // 初期並進: 重み付き重心から
@@ -752,7 +755,10 @@ function fuseBody(g, list){
             // 本ゲートは仮通し用＝姿勢の実品質はP2/P3(F2/F3)で判定する
             const psG=dets.map(d=>tagPx(d)).sort((x,y)=>x-y);
             const gatePx=Math.min(40, Math.max(20, 20*psG[Math.floor(psG.length/2)]/100));
-            if(ref.rmsPx<gatePx){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+            if(ref.rmsPx<gatePx){
+                R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`;
+                keepTags.forEach(t=>pnpDiag[t.id]='✓'+pnpDiag[t.id]);   // 採用タグの印（枠ラベル用）
+            }
             else {
                 pnpFail=ref.rmsPx;                           // 棄却理由を可視化
                 pnpDiagLog(dets, pnpDiag, `棄却${ref.rmsPx.toFixed(0)}px>ゲート${gatePx.toFixed(0)}`);
@@ -761,12 +767,29 @@ function fuseBody(g, list){
             tags.forEach(t=>{ if(!pnpDiag[t.id]) pnpDiag[t.id]='順OK(相方不足)'; });
             pnpDiagLog(dets, pnpDiag, '対応タグ2枚未満で不実行');
         }
+        // 画面表示用: 直近診断を保存し、タグ別残差のEMAを更新 → PnP不調時の主因と対処を提示
+        pnpView[g]=pnpDiag;
+        for(const id of Object.keys(pnpDiag)){
+            const m=String(pnpDiag[id]).match(/(\d+)px/);
+            if(m){ const e=pnpEma[g]; e[id]=e[id]==null?+m[1]:e[id]*0.7+(+m[1])*0.3; }
+        }
+        if(method==='中心'){
+            if(residual>modelSpanMm(g)*0.035){
+                help=`⚠ モデル品質低（Horn${residual.toFixed(1)}mm）→ 再キャリブ推奨（画面ガイドに従う）`;
+            } else {
+                const e=pnpEma[g];
+                const worst=Object.keys(pnpDiag).filter(id=>e[id]!=null).sort((a,b)=>e[b]-e[a]).slice(0,2);
+                help=worst.length
+                    ? `PnPの足かせ: ${worst.map(id=>`id${id}(${Math.round(e[id])}px)`).join('・')} → その面を中央・正面気味で30秒静止`
+                    : '向き学習待ち: 数方向から各30秒静止視聴';
+            }
+        }
         // PnPが走らなかった場合の理由を表示（Q=向きあり可視タグ / 順=対応付け成功）
         if(method==='中心' && pnpFail==null){
             method=`中心 Q${qVis}/順${tags.length}${ordErrN?`(ズレ${(ordErrSum/ordErrN).toFixed(0)}px)`:''}`;
         }
     }
-    return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail };
+    return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail, help };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -1014,7 +1037,7 @@ function doMeasure(groups){
                 $('s-delta').textContent=`${viewDiff.toFixed(2)}°`;
                 $('s-delta').className=viewDiff<1?'val good':viewDiff<3?'val mid':'val bad';
             } else {
-                $('lbl-main').textContent='単体診断モード｜視点ロックで視点バイアスを数値検証できます';
+                $('lbl-main').textContent=est.help||'単体診断モード｜視点ロックで視点バイアスを数値検証できます';
                 $('s-delta').textContent=`${est.faces}面 ${est.method}${est.pnpRms!=null?` ${est.pnpRms.toFixed(1)}px`:''}${est.pnpFail!=null?`(P棄${est.pnpFail.toFixed(0)}px)`:''}`;
                 $('s-delta').className=est.method&&est.method.startsWith('PnP')?'val good':'val mid';
             }
@@ -1098,13 +1121,18 @@ function drawTag(d){
         const n=(g&&calibCount[g][d.id])||0;
         ok = n>=CALIB_OK;
         label += ` ${Math.min(n,CALIB_OK)}/${CALIB_OK}`;
-    } else {
+    }
+    let txtColor=null;
+    if(!calibrating){
         ok = !!(g && ((model[g]||{}).P||{})[d.id]);      // 学習済=緑, 未学習=橙
+        // PnPの直近診断をラベルに併記（✓○px=採用・緑 / それ以外=不採用理由・赤）
+        const pv=g && pnpView[g] && pnpView[g][d.id];
+        if(pv){ label+=` ${pv}`; txtColor=String(pv)[0]==='✓'?'#34d058':'#ff3b30'; }
     }
     ctx.strokeStyle = ok ? '#34d058' : '#ff9500';
     ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
     for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
-    ctx.fillStyle = ok ? '#34d058' : '#ff9500'; ctx.font='bold 13px -apple-system';
+    ctx.fillStyle = txtColor || (ok ? '#34d058' : '#ff9500'); ctx.font='bold 13px -apple-system';
     ctx.fillText(label, c[0].x+4, c[0].y-4);
 }
 
@@ -1221,7 +1249,7 @@ function armedClick(btn, warnText, fn){
 
 const startCalib=()=>{
     calibrating=true; _calLast=null; calibRejected=0;
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
     $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
     addLog('キャリブ開始: 回して→止める、の繰り返しで全面25/25緑＋半周（動いている間は自動で収集停止）');
 };
@@ -1266,7 +1294,7 @@ $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
 $('recordBtn').textContent='記録開始';
 $('resetBtn').onclick=armedClick($('resetBtn'), '⚠全消去！もう一度', ()=>{
     model=emptyModel(); saveModel();
-    GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; });
+    GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
     addLog('学習モデルを消去しました');
 });
 </script>
