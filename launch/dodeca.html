@@ -392,7 +392,7 @@ function finishCalibrate(){
     calibrating=false;
     $('calibBtn').textContent='キャリブ開始';
     $('calibBtn').className='warn';
-    let msg=[];
+    let msg=[], faceMsgs=[];
     for(const g of GROUPS.map(g=>g.key)){
         const frames=calibFrames[g];
         if(frames.length<5) continue;                      // データ不足
@@ -408,6 +408,34 @@ function finishCalibrate(){
             const P=fids.map(id=>pos[id]), C=fids.map(id=>fr[id]);
             rmss.push(WMGeom.hornPose(P,C).rms*1000); }
         rmss.sort((a,b)=>a-b); const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
+        // 面別整合: モデル上の面間距離 vs 実測(各フレームのpose.t間距離)中央値の誤差。
+        // 1面だけ配置が壊れた事故（2026-06-11実機: 1面30mmズレ→Horn残差32mm）の犯人特定用
+        const pairDists={};
+        for(const fr of frames){
+            const fids=Object.keys(fr).filter(id=>pos[id]);
+            for(let i=0;i<fids.length;i++) for(let j=i+1;j<fids.length;j++){
+                const a=fr[fids[i]], b=fr[fids[j]];
+                const k=fids[i]<fids[j]?fids[i]+'-'+fids[j]:fids[j]+'-'+fids[i];
+                (pairDists[k]=pairDists[k]||[]).push(Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]));
+            }
+        }
+        const allIds=Object.keys(pos), faceErr={};
+        for(const id of allIds){
+            const errs=[];
+            for(const jd of allIds){
+                if(jd===id) continue;
+                const k=id<jd?id+'-'+jd:jd+'-'+id;
+                const ds=pairDists[k]; if(!ds||ds.length<5) continue;
+                ds.sort((x,y)=>x-y);
+                const med=ds[Math.floor(ds.length/2)];
+                const dm=Math.hypot(pos[id][0]-pos[jd][0],pos[id][1]-pos[jd][1],pos[id][2]-pos[jd][2]);
+                errs.push(Math.abs(dm-med)*1000);
+            }
+            if(errs.length){ errs.sort((x,y)=>x-y); faceErr[id]=errs[Math.floor(errs.length/2)]; }
+        }
+        const feTh=Math.max(3, modelSpanMm(g)*0.03);
+        const feStr=allIds.sort((a,b)=>+a-+b).map(id=>`id${id}:${faceErr[id]!=null?faceErr[id].toFixed(0)+(faceErr[id]>feTh?'⚠':''):'-'}`).join(' ');
+        faceMsgs.push(`[${g}] 面別整合mm: ${feStr}（⚠=${feTh.toFixed(0)}mm超→その面の収集不足・要再キャリブ）`);
         // タグ向き学習: R_tag_body = R_body_cam^T · R_tag_cam を全フレームから集め、
         // 凸形状の事前知識（タグ法線は本体重心から外向き）で重み付けして最大クラスタで確定。
         // flip解は法線が外向きから2×入射角ずれるため重みが落ち、クラスタのタイでも負ける。
@@ -455,6 +483,7 @@ function finishCalibrate(){
     }
     saveModel();
     addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・2面以上で回す）'}`);
+    faceMsgs.forEach(l=>addLog(l));
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
 }
 
