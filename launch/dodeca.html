@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.14.0';
+    const _V = 'd0.15.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.14.0</p>
+    <p style="color:#555;">d0.15.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -112,6 +112,8 @@
         <button id="lockBtn" class="sec">視点ロック</button>
         <button id="recordBtn" class="sec">記録</button>
         <button id="detTestBtn" class="sec">検出安定</button>
+        <button id="saveModelBtn" class="sec">モデル保存</button>
+        <button id="loadModelBtn" class="sec">復元</button>
         <button id="zeroClrBtn" class="sec">ゼロ解除</button>
         <button id="resetBtn" class="sec">学習消去</button>
     </div>
@@ -188,7 +190,7 @@ function applyMode(m){
     mode = m;
     GROUPS = MODES[mode].groups;
     model = loadModel();
-    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; });
+    GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; bodyHist[g.key].length=0; noTargetFrames[g.key]=0; qAcc[g.key]={}; qObs[g.key]={}; });
     renderGroupRows();
 }
 
@@ -518,6 +520,8 @@ function modelSpanMm(g){
     }
     return s*1000;
 }
+// Q更新の答え合わせ用: 直近の実フレーム標本（コーナー観測＋本体姿勢）を面別に保持
+const qObs=Object.fromEntries(GROUPS.map(g=>[g.key,{}]));
 function collectQ(g, dets, R, residual){
     if(calibrating) return;
     const gate=Math.max(5, modelSpanMm(g)*0.0625);         // 本体姿勢が信頼できるフレームのみ（サイズ比例）
@@ -527,8 +531,17 @@ function collectQ(g, dets, R, residual){
     const cen=[0,0,0];
     for(const id of pids) for(let a=0;a<3;a++) cen[a]+=P[id][a]/pids.length;
     const RbcT=matT(R);
+    // 本体並進（重心整合）: 答え合わせの投影に使う
+    let pb=[0,0,0], cb=[0,0,0], nC=0;
+    for(const d of dets){ if(!P[d.id]||!d.pose||!d.pose.t) continue; nC++; for(let a=0;a<3;a++){ pb[a]+=P[d.id][a]; cb[a]+=d.pose.t[a]; } }
+    for(let a=0;a<3;a++){ pb[a]/=nC; cb[a]/=nC; }
+    const Rp=WMGeom.matVec3(R,pb);
+    const tBody=[cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
     for(const d of dets){
         if(!P[d.id]||!d.pose||!d.pose.R) continue;
+        const obs=qObs[g][d.id]=qObs[g][d.id]||[];
+        obs.push({uv:d.corners.map(c=>[c.x,c.y]), R, t:tBody});
+        if(obs.length>3) obs.shift();
         const acc=qAcc[g][d.id]=qAcc[g][d.id]||{Rs:[],ws:[]};
         const out=[P[d.id][0]-cen[0], P[d.id][1]-cen[1], P[d.id][2]-cen[2]];
         const on=Math.hypot(out[0],out[1],out[2])||1;
@@ -543,9 +556,27 @@ function collectQ(g, dets, R, residual){
     }
     if(++qGoodFrames>=60){ qGoodFrames=0; refreshQ(g); }   // 約10秒ごとに再推定
 }
+// 候補Qで直近標本のコーナー予測誤差（px・中央値）を出す。観測コーナーが正解データなので、
+// フリップ解・視点バイアス解はここで必ず大きい誤差になる
+function qPredErr(g, id, Qc){
+    const obsArr=(qObs[g]&&qObs[g][id])||[];
+    if(!obsArr.length) return null;
+    const P=model[g].P; if(!P||!P[id]) return null;
+    const hh=tagSizeM(+id)/2;
+    const errs=[];
+    for(const o of obsArr){
+        const Xc=TAG_LOCAL(hh).map(l=>{
+            const v=WMGeom.matVec3(Qc,l);
+            return [P[id][0]+v[0], P[id][1]+v[1], P[id][2]+v[2]];
+        });
+        errs.push(resolveCornerOrder(Xc, o.uv, o.R, o.t).avg);
+    }
+    errs.sort((a,b)=>a-b);
+    return errs[Math.floor(errs.length/2)];
+}
 function refreshQ(g){
     const Q=model[g].Q||{}, Qs=model[g].Qs||{};
-    let changed=0;
+    let changed=0, rejected=0;
     for(const id of Object.keys(qAcc[g])){
         const acc=qAcc[g][id];
         if(acc.Rs.length<20) continue;
@@ -559,12 +590,19 @@ function refreshQ(g){
         const prevS=Qs[id]||0;
         if(!Q[id] || pick.support>prevS+0.05 ||
            (pick.support>=prevS-0.02 && WMGeom.rotAngleDeg(Q[id],newQ)>2)){
+            // 答え合わせゲート: 同一視点の候補が多数派を占めると支持率だけ上がって悪いQに
+            // 化けることがある（実機: 三脚固定中の更新でPnPが死んだ）。直近実フレームで
+            // コーナー予測誤差が旧Qより悪化する更新は拒否する
+            if(Q[id]){
+                const eN=qPredErr(g,id,newQ), eO=qPredErr(g,id,Q[id]);
+                if(eN!=null && eO!=null && eN>eO){ rejected++; continue; }
+            }
             Q[id]=newQ; Qs[id]=+pick.support.toFixed(2); changed++;
         }
     }
-    if(changed){
-        model[g].Q=Q; model[g].Qs=Qs; saveModel();
-        addLog(`向き自動学習: ${Object.keys(Q).length}面（更新${changed}・静止視聴で精度向上）`);
+    if(changed||rejected){
+        if(changed){ model[g].Q=Q; model[g].Qs=Qs; saveModel(); }
+        addLog(`向き自動学習: ${Object.keys(Q).length}面（更新${changed}${rejected?`・悪化拒否${rejected}`:''}・静止視聴で精度向上）`);
     }
 }
 
@@ -1067,13 +1105,51 @@ $('modeSelect').onchange=e=>applyMode(e.target.value);
 });
 
 $('startBtn').onclick=()=>init();
-$('calibBtn').onclick=()=>{
-    if(!calibrating){
-        calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
-        $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
-        addLog('キャリブ開始: A・Bを順に回して全面を見せる');
-    } else finishCalibrate();
+// ===== 誤爆ガード（破壊的ボタンは2度押し式） =====
+// 1回目で警告表示（3秒で自動解除）、3秒以内の2回目で実行。
+// confirm()等のモーダルはiOSでカメラが止まるため使えない（d0.11.1のフリーズバグ参照）
+function armedClick(btn, warnText, fn){
+    let armed=0;
+    return ()=>{
+        const now=performance.now();
+        if(now>armed){
+            armed=now+3000;
+            btn.dataset.orig=btn.textContent;
+            btn.textContent=warnText; btn.style.background='#ff3b30'; btn.style.color='#fff';
+            setTimeout(()=>{ if(performance.now()>=armed){ btn.textContent=btn.dataset.orig; btn.style.background=''; btn.style.color=''; } }, 3100);
+            return;
+        }
+        armed=0;
+        btn.textContent=btn.dataset.orig; btn.style.background=''; btn.style.color='';
+        fn();
+    };
+}
+
+const startCalib=()=>{
+    calibrating=true; GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
+    $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
+    addLog('キャリブ開始: コマ送り（30〜45°回して1〜2秒静止）で全面25/25緑＋半周');
 };
+const armedCalibStart=armedClick($('calibBtn'), '⚠上書き！もう一度で開始', startCalib);
+$('calibBtn').onclick=()=>{ if(calibrating) finishCalibrate(); else armedCalibStart(); };
+
+// ===== モデル退避スロット（磨き済みモデルの保護） =====
+const bakKey=()=>MODES[mode].modelKey+'_bak';
+$('saveModelBtn').onclick=()=>{
+    const at=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+    localStorage.setItem(bakKey(), JSON.stringify({at, model}));
+    addLog(`✅ モデルを退避スロットへ保存（${at}）。「復元」でいつでも戻せます`);
+};
+$('loadModelBtn').onclick=armedClick($('loadModelBtn'), '⚠上書き！もう一度', ()=>{
+    const s=localStorage.getItem(bakKey());
+    if(!s){ addLog('退避スロットが空です（先に「モデル保存」を押す）'); return; }
+    try{
+        const b=JSON.parse(s);
+        model=b.model; saveModel();
+        GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; bodyHist[g.key].length=0; });
+        addLog(`✅ モデルを復元しました（${b.at}保存分）`);
+    }catch(e){ addLog('❌ 復元失敗: 保存データが壊れています'); }
+});
 $('zeroBtn').onclick=()=>setZero();
 $('lockBtn').onclick=()=>{
     const btn=$('lockBtn');
@@ -1093,7 +1169,11 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
 $('recordBtn').textContent='記録開始';
-$('resetBtn').onclick=()=>{ model=emptyModel(); saveModel(); GROUPS.forEach(g=>{ qAcc[g.key]={}; }); addLog('学習モデルを消去しました'); };
+$('resetBtn').onclick=armedClick($('resetBtn'), '⚠全消去！もう一度', ()=>{
+    model=emptyModel(); saveModel();
+    GROUPS.forEach(g=>{ qAcc[g.key]={}; qObs[g.key]={}; });
+    addLog('学習モデルを消去しました');
+});
 </script>
 </body>
 </html>
