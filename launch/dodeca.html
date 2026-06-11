@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.10.1';
+    const _V = 'd0.11.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -44,7 +44,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.10.1</p>
+    <p style="color:#555;">d0.11.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 各ターゲットを回してキャリブ<br>
        ② 調整前に「ゼロ点設定」<br>
@@ -111,6 +111,7 @@
         <button id="measureBtn">測定5秒</button>
         <button id="lockBtn" class="sec">視点ロック</button>
         <button id="recordBtn" class="sec">記録</button>
+        <button id="detTestBtn" class="sec">検出安定</button>
         <button id="zeroClrBtn" class="sec">ゼロ解除</button>
         <button id="resetBtn" class="sec">学習消去</button>
     </div>
@@ -332,6 +333,7 @@ function process(){
     ctx.clearRect(0,0,W,H);
     const usable=dets.filter(d=>d.pose&&d.pose.R&&tagPx(d)>=MIN_TAG_PX);
     usable.forEach(drawTag);
+    if(detTest) detTestFrame(dets, usable);
 
     // グループ分け
     const groups=Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
@@ -485,10 +487,14 @@ function refreshQ(g){
         if(!pick||pick.support<0.4) continue;
         const close=acc.Rs.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<10);
         const newQ=close.length>=8 ? WMGeom.avgRotGS(close) : pick.R;
-        if(!Q[id] || WMGeom.rotAngleDeg(Q[id],newQ)>1 || (Qs[id]||0)<pick.support-0.05){
-            Q[id]=newQ; changed++;
+        // 更新ヒステリシス: 旧条件（1°超ズレで毎回更新）は推定ゆらぎを拾って更新2〜6/回の
+        // フリッカーを起こした。支持率が明確に上がったか、同等以上の支持率で2°超の
+        // 実ドリフトがあるときだけ置き換える。Qsは保存中のQの支持率として同時にだけ更新。
+        const prevS=Qs[id]||0;
+        if(!Q[id] || pick.support>prevS+0.05 ||
+           (pick.support>=prevS-0.02 && WMGeom.rotAngleDeg(Q[id],newQ)>2)){
+            Q[id]=newQ; Qs[id]=+pick.support.toFixed(2); changed++;
         }
-        Qs[id]=+pick.support.toFixed(2);
     }
     if(changed){
         model[g].Q=Q; model[g].Qs=Qs; saveModel();
@@ -587,8 +593,9 @@ function fuseBody(g, list){
                 if(!r2 || r2.rmsPx>=ref.rmsPx) break;
                 ref=r2; keepTags=keep; used=keep.length;
             }
-            // 受け入れ: 15px未満（レンズ歪み未補正のため合成テスト基準より緩め）
-            if(ref.rmsPx<15){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+            // 受け入れ: 20px未満（仮ゲート。系統誤差16〜18pxの正体調査中のため15pxから緩和し、
+            // PnP姿勢の実品質をP2/P3で実測する。系統誤差が全タグ一様なら姿勢への影響は小さい想定）
+            if(ref.rmsPx<20){ R=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
             else {
                 pnpFail=ref.rmsPx;                           // 棄却理由を可視化
                 // タグ別内訳を5秒に1回ログ（どのタグの向きが悪いか特定用）
@@ -622,6 +629,54 @@ function bodyStability(g){
     let s=0; for(const q of arr) s+=angBetween(Ravg,quatToMat(q));
     return s/arr.length;
 }
+
+// ===== 検出安定性テスト（白フチ幅・タグ品質の設計検証用）=====
+// 10秒間、タグごとの検出率（全フレームに対する在率）を集計してログに出す。
+// 白フチ不足・照明・段差影の問題はコーナー検出のフリッカー＝検出率低下として現れる。
+// 「生」=検出器が返した回数 / 「採用」=pose有り＋MIN_TAG_PX以上で測定に使えた回数。
+// 静止構図で実施し、見えているはずの面の採用率を見る（95%未満は要注意）。
+const DET_TEST_SEC=10;
+let detTest=null; // {t0, frames, ids:{id:{raw,used,pxSum,pxMin,dSum}}}
+function detTestFrame(dets, usable){
+    detTest.frames++;
+    for(const d of dets){
+        const a=detTest.ids[d.id]=detTest.ids[d.id]||{raw:0,used:0,pxSum:0,pxMin:1e9,dSum:0};
+        a.raw++;
+    }
+    for(const d of usable){
+        const a=detTest.ids[d.id];
+        const px=tagPx(d);
+        a.used++; a.pxSum+=px; a.pxMin=Math.min(a.pxMin,px);
+        if(d.pose&&d.pose.t) a.dSum+=Math.hypot(d.pose.t[0],d.pose.t[1],d.pose.t[2]);
+    }
+    if((performance.now()-detTest.t0)/1000>=DET_TEST_SEC) finishDetTest();
+}
+function finishDetTest(){
+    const {frames, ids}=detTest; detTest=null;
+    const btn=$('detTestBtn'); btn.textContent='検出安定'; btn.disabled=false;
+    const lines=[`=== 検出安定 ${DET_TEST_SEC}s ${frames}フレーム ${diagCfgStr()} ===`];
+    const idList=Object.keys(ids).map(Number).sort((a,b)=>a-b);
+    if(!idList.length){ lines.push('タグ検出なし'); }
+    let worst=100;
+    for(const id of idList){
+        const a=ids[id];
+        const rate=100*a.used/frames;
+        worst=Math.min(worst,rate);
+        const px=a.used?(a.pxSum/a.used).toFixed(0):'-';
+        const dist=a.used?(100*a.dSum/a.used).toFixed(0):'-';
+        const flick=a.raw>a.used?` 生${(100*a.raw/frames).toFixed(0)}%`:'';
+        lines.push(`id${id}: 採用${rate.toFixed(0)}%${flick} ${px}px(min${a.pxMin===1e9?'-':a.pxMin.toFixed(0)}) 距離${dist}cm${rate<95?' ⚠':''}`);
+    }
+    if(idList.length) lines.push(`判定: 静止構図で見えている面の採用率95%以上が合格（最低${worst.toFixed(0)}%）。低い面は白フチ幅/照明/段差影/入射角を疑う`);
+    lines.forEach(l=>addLog(l));
+    if(recording) lines.forEach(l=>recordLog.push(l));
+}
+$('detTestBtn').onclick=()=>{
+    if(detTest) return;
+    detTest={t0:performance.now(), frames:0, ids:{}};
+    const btn=$('detTestBtn'); btn.textContent='計測中…'; btn.disabled=true;
+    addLog(`検出安定テスト開始（${DET_TEST_SEC}秒静止・構図を動かさない）`);
+};
 
 // ===== 連続記録 =====
 let recording=false, recordLog=[], recordStart=0, recordTimer=null;
