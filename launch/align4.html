@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.9.0';
+    const _V = 'a0.9.1';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.9.0</p>
+    <p style="color:#555;">a0.9.1</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -501,6 +501,13 @@ let refRbw = null, rbwHist = [], lastVdiff = null, vpCount = 0;
 function recordViewpoint(){
     if(!currentMeasure){ addLog('❌ 視点記録失敗: ターゲット未検出'); return; }
     if(currentMeasure.mode!=='world'){ addLog('❌ 視点記録失敗: world測定になっていません（床タグ3枚以上を映す）'); return; }
+    // 静止チェック: 移動直後の値を記録しない（直近world測定4フレームのR広がりで判定）
+    if(rbwHist.length>=4){
+        const last=rbwHist[rbwHist.length-1];
+        let mx=0;
+        for(let i=rbwHist.length-4;i<rbwHist.length-1;i++) mx=Math.max(mx, angBetween(rbwHist[i], last));
+        if(mx>1.0){ addLog(`❌ 視点記録失敗: 動いています（直近ブレ${mx.toFixed(2)}°）。静止して2秒待ってからもう一度`); return; }
+    }
     vpCount++;
     const cp=currentMeasure.cameraPose;
     const vd=(refRbw&&lastVdiff!=null)?`視点差分${lastVdiff.toFixed(2)}°`:'視点差分-（未ロック）';

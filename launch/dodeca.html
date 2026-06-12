@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.22.0';
+    const _V = 'd0.23.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -26,7 +26,8 @@
         .good { color:#34d058; } .bad { color:#ff6b6b; } .mid { color:#ffd700; }
         #graph-wrap { position:absolute; left:10px; right:10px; top:250px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:8px 10px; }
         #toe-graph { width:100%; display:block; border-radius:8px; }
-        #controls { position:absolute; bottom:168px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
+        /* bottom:196px = ログヘッダー（メモ欄・bottom:162px+高さ約27px）の上端より上。168pxだと詳細展開時の最下段ボタンにメモ欄が重なる */
+        #controls { position:absolute; bottom:196px; left:50%; transform:translateX(-50%); display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:96%; }
         #log-panel { position:absolute; bottom:10px; left:10px; right:10px; background:rgba(0,0,0,0.78); backdrop-filter:blur(10px); border-radius:14px; padding:10px; height:150px; overflow-y:auto; font-size:11px; font-family:monospace; line-height:1.5; }
         .entry { border-bottom:1px solid #222; padding:2px 0; }
         button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; white-space:nowrap; }
@@ -44,10 +45,10 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.22.0</p>
+    <p style="color:#555;">d0.23.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
-       ① 「キャリブ開始」→ ターゲットを<b>回して→止める</b>の繰り返し<br>
-       　（画面の指示に従えば<b>自動で完了</b>します）<br>
+       ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
+       　次に浅い角度で<b>回して→止める</b>で一周（<b>自動で完了</b>します）<br>
        ② 上部に<b>✅測定OK</b>が出たら、調整前に「ゼロ点設定」<br>
        ③ 調整後にΔを読む（=変化量）<br><br>
        <span style="color:#888;font-size:12px;">⚠が出たら画面の指示どおりに直せばOK。<br>細かいツールは「詳細」ボタンの中。</span></p>
@@ -430,7 +431,7 @@ function doCalibrate(groups){
 
 // キャリブ品質ゲート: 「完了したけど実は不良品」（欠3面なのに残差0.6mmで見かけ完璧、等）を
 // 完了させない。未達なら理由と対処を表示して収集継続。4秒以内の再押下で強制確定は可能。
-let calibIssueMsg=null, finishArm=0, _calibEvalN=0;
+let calibIssueMsg=null, finishArm=0, _calibEvalN=0, calibBtnCooldown=0;
 function assessCalib(){
     // 品質評価（モデルには書き込まない）: 終了時ゲートとキャリブ中の常時評価の両方から使う
     const results=[], issues=[];
@@ -481,7 +482,18 @@ function assessCalib(){
         }
         const feTh=Math.max(3, spanMm*0.03);
         // 品質チェック
-        if(failed.length) issues.push(`${g}:配置できない面 id${failed.join(',')}→その面を他の面2枚と一緒に・止めながら映す`);
+        // 配置には「配置済みの面4枚と同時に映った実績」が必要（reconstruct/placeLinearの仕様）。
+        // 不足している面ごとに配置済みの相方数を出す（旧文言「他の面2枚と」は条件を満たせない誤案内だった）
+        if(failed.length){
+            const pc={};
+            for(const fid of failed){
+                const set=new Set();
+                for(const fr of frames){ if(fr[fid]==null) continue;
+                    for(const k of Object.keys(fr)) if(+k!==+fid && pos[k]) set.add(k); }
+                pc[fid]=set.size;
+            }
+            issues.push(`${g}:配置できない面 ${failed.map(f=>`id${f}(相方${Math.min(pc[f]||0,4)}/4)`).join(',')}→配置済みの面4枚と同時に・止めて映す（真上から全面が映る構図が早い）`);
+        }
         const badF=allIds.filter(id=>faceErr[id]!=null&&faceErr[id]>feTh).sort((a,b)=>faceErr[b]-faceErr[a]);
         if(badF.length) issues.push(`${g}:位置あいまい ${badF.map(id=>`id${id}(${faceErr[id].toFixed(0)}mm)`).join('・')}→その面を別の角度からも映す`);
         if(medRms>spanMm*0.03) issues.push(`${g}:全体残差${medRms.toFixed(1)}mm→上下の角度も混ぜてもう1周`);
@@ -518,6 +530,9 @@ function finishCalibrate(force){
     }
     // ===== 第2パス: コミット（タグ向き学習・メタ・保存） =====
     calibrating=false; calibIssueMsg=null; finishArm=0;
+    // 完了直後の連打ガード: 余分な押下が「新規開始→4秒強制確定」になり
+    // 良モデルを空/不良キャリブで上書きする事故があった（2026-06-12朝に実害）
+    calibBtnCooldown=performance.now()+2000;
     $('calibBtn').textContent='キャリブ開始';
     $('calibBtn').className='warn';
     let msg=[], faceMsgs=[];
@@ -572,8 +587,12 @@ function finishCalibrate(force){
         model[g].meta={ rms:+medRms.toFixed(1), supMin, supMax, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) };
         msg.push(`${g}:${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
     }
-    saveModel();
-    addLog(`キャリブ完了 ${msg.join(' / ')||'（データ不足・静止時間が短すぎる可能性）'}${calibRejected?` 動き棄却${calibRejected}f`:''}`);
+    if(msg.length){
+        saveModel();
+        addLog(`キャリブ完了 ${msg.join(' / ')}${calibRejected?` 動き棄却${calibRejected}f`:''}`);
+    } else {
+        addLog('⚠ キャリブ中止（有効データなし）。モデルは変更されていません');
+    }
     faceMsgs.forEach(l=>addLog(l));
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; });
 }
@@ -655,6 +674,9 @@ function collectQ(g, dets, R, residual){
 // 効果的なデータ: 距離・角度に加えて「ターゲットが画面の中央/端」も変える（k1の可観測性）
 const baObs=Object.fromEntries(GROUPS.map(g=>[g.key,[]]));
 const BA_MIN=12, BA_MAX=50;
+// 前回精錬時の観測数。同じデータでの再精錬はk1がP/Qへ漏れて0へ滑る
+// （2026-06-12実測: 連打で-0.084→-0.050→-0.035→-0.016→-0.001）ため、新観測+6を要求
+const baRunAt=Object.fromEntries(GROUPS.map(g=>[g.key,-1]));
 function baCollect(g, dets, R, t){
     const arr=baObs[g];
     if(arr.length>=BA_MAX) return;
@@ -664,12 +686,16 @@ function baCollect(g, dets, R, t){
     arr.push({R:R.map(r=>r.slice()), t:t.slice(), tags:dets.map(d=>({id:d.id, uv:d.corners.map(c=>[c.x,c.y])}))});
     $('baBtn').textContent=`精錬(${arr.length})`;
 }
-function resetBaObs(){ GROUPS.forEach(x=>{ baObs[x.key]=[]; }); $('baBtn').textContent='精錬(0)'; }
+function resetBaObs(){ GROUPS.forEach(x=>{ baObs[x.key]=[]; baRunAt[x.key]=-1; }); $('baBtn').textContent='精錬(0)'; }
 $('baBtn').onclick=()=>{
     const g=GROUPS.map(x=>x.key).sort((a,b)=>baObs[b].length-baObs[a].length)[0];
     const frames=baObs[g];
     if(frames.length<BA_MIN){
         addLog(`精錬には${BA_MIN}視点必要（現在${frames.length}）。距離・角度・画面内の位置（中央/端寄り）を変えながら静止視聴で貯まります`);
+        return;
+    }
+    if(baRunAt[g]>=0 && frames.length-baRunAt[g]<6){
+        addLog(`⚠ 精錬スキップ: 前回から新しい観測が+${frames.length-baRunAt[g]}視点のみ（+6必要）。同じデータでの再精錬はk1を歪めます。別の視点・距離・画面位置で観測を追加してから`);
         return;
     }
     const btn=$('baBtn'); btn.textContent='計算中…'; btn.disabled=true;
@@ -686,7 +712,11 @@ $('baBtn').onclick=()=>{
                 model[g].Qs=Qs; saveModel();
                 camK1=r.k1; localStorage.setItem('scanscope_k1', String(camK1));
                 GROUPS.forEach(x=>{ qAcc[x.key]={}; qObs[x.key]={}; pnpEma[x.key]={}; pnpView[x.key]={}; bodyHist[x.key].length=0; });
+                baRunAt[g]=baObs[g].length;
                 addLog(`✅ 精錬完了[${g}]: 再投影${r.rms0.toFixed(1)}→${r.rms.toFixed(1)}px・k1=${r.k1.toFixed(4)}・${r.frames}視点使用。「モデル保存」を推奨`);
+                // 真のk1≈0が実測済み（iPhoneは動画パイプラインで歪み補正済み。A:-0.001/B:+0.010）。
+                // 大きいk1は観測の偏りが作る偽解で、P/Qを歪ませ視点依存バイアスになる（6/12朝の事件）
+                if(Math.abs(r.k1)>0.05) addLog(`⚠ |k1|=${Math.abs(r.k1).toFixed(3)}は大きすぎる（真値≈0の実績）。偽解の疑い→視点・距離・画面位置を広げて観測を追加し再精錬を推奨`);
             }
         }catch(e){ addLog('❌ 精錬エラー: '+e.message); }
         btn.textContent=`精錬(${baObs[g].length})`; btn.disabled=false;
@@ -1051,6 +1081,9 @@ function stopRecord(){
                 btn.textContent='記録開始'; btn.style.background=''; btn.style.color='';
                 btn.onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
             }, 2000);
+        }).catch(()=>{
+            btn.textContent='コピー失敗→もう一度';
+            setTimeout(()=>{ btn.textContent='↑ ここを押してコピー'; }, 1500);
         });
     };
 }
@@ -1106,6 +1139,8 @@ function renderCalibGuide(groups){
                 if(n<CALIB_OK) remain.push(`id${i}:${n}`);
             }
             if(remain.length) msg=`見せて→ ${remain.slice(0,3).join(' ')}${remain.length>3?` 他${remain.length-3}面`:''}`;
+            // カウント達成でも品質未達（配置・整合）が残っていれば「全面OK」とは言わない（矛盾表示の修正）
+            else if(calibIssueMsg){ msg='カウントOK・品質未達 → ⚠の指示どおりに映す'; cls='val mid'; }
             else { msg='✅ 全面OK あと半周→終了'; cls='val good'; }
         }
     }
@@ -1120,7 +1155,10 @@ function renderCalibGuide(groups){
 // 測定の合否ステータス: 「今の数値は信用していいか」を一目で
 function verdictFor(est, gkey){
     if(!est) return '<span class="bad">❌ ターゲットなし</span>';
-    if(est.residual>modelSpanMm(gkey)*0.035) return '<span class="bad">❌ モデル不一致→再キャリブ</span>';
+    // 0.045: 健康モデルの実測上限（再精錬後Horn2〜7mm・スパン230mm）に余裕を持たせつつ、
+    // 壊れたモデル（偽k1事件で13〜14mm）は確実に検出する。数値も出す（出っぱなし事故の調査用）
+    const vGate=modelSpanMm(gkey)*0.045;
+    if(est.residual>vGate) return `<span class="bad">❌ モデル不一致(Horn${est.residual.toFixed(1)}mm>${vGate.toFixed(0)})→静止視聴+精錬 or 再キャリブ</span>`;
     if(est.method&&est.method.startsWith('PnP')){
         const n=parseInt(est.method.slice(3))||0;
         return n>=3 ? `<span class="good">✅ 測定OK（PnP${n}）</span>`
@@ -1262,8 +1300,11 @@ function drawTag(d){
     ctx.strokeStyle = ok ? '#34d058' : '#ff9500';
     ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
     for(let i=1;i<4;i++)ctx.lineTo(c[i].x,c[i].y); ctx.closePath(); ctx.stroke();
-    ctx.fillStyle = txtColor || (ok ? '#34d058' : '#ff9500'); ctx.font='bold 13px -apple-system';
-    ctx.fillText(label, c[0].x+4, c[0].y-4);
+    // ラベルは22px＋黒フチ（13pxは実機で読めなかった）
+    ctx.font='bold 22px -apple-system';
+    ctx.lineWidth=4; ctx.strokeStyle='rgba(0,0,0,0.85)'; ctx.strokeText(label, c[0].x+4, c[0].y-6);
+    ctx.fillStyle = txtColor || (ok ? '#34d058' : '#ff9500');
+    ctx.fillText(label, c[0].x+4, c[0].y-6);
 }
 
 // ===== 測定モード（5秒・中央値+MAD）=====
@@ -1327,10 +1368,15 @@ function addLog(msg){
     const e=document.createElement('div'); e.className='entry'; e.textContent=line; logEl.prepend(e);
 }
 $('logCopyBtn').onclick=()=>{
+    const btn=$('logCopyBtn');
+    // 復帰テキストは固定文字列にする（連打すると「コピー済み ✓」を元テキストとして
+    // 保存してしまい、ボタンが永久に固まるバグがあった）
     navigator.clipboard.writeText(allLog.join('\n')).then(()=>{
-        const btn=$('logCopyBtn'); const t=btn.textContent;
         btn.textContent='コピー済み ✓';
-        setTimeout(()=>{ btn.textContent=t; }, 2000);
+        setTimeout(()=>{ btn.textContent='ログ全コピー'; }, 2000);
+    }).catch(()=>{
+        btn.textContent='コピー失敗→もう一度';
+        setTimeout(()=>{ btn.textContent='ログ全コピー'; }, 2000);
     });
 };
 
@@ -1382,10 +1428,14 @@ const startCalib=()=>{
     GROUPS.forEach(g=>{ calibFrames[g.key]=[]; calibRots[g.key]=[]; calibCount[g.key]={}; pnpEma[g.key]={}; pnpView[g.key]={}; });
     resetBaObs();
     $('calibBtn').textContent='キャリブ終了'; $('calibBtn').className='good';
-    addLog('キャリブ開始: 回して→止める、の繰り返しで全面25/25緑＋半周（動いている間は自動で収集停止）');
+    addLog('キャリブ開始: ①まず真上から全面が同時に映る構図で止める → ②浅い角度で「回して→止める」コマ送りで一周（動いている間は自動で収集停止）');
 };
 const armedCalibStart=armedClick($('calibBtn'), '⚠上書き！もう一度で開始', startCalib);
-$('calibBtn').onclick=()=>{ if(calibrating) finishCalibrate(performance.now()<finishArm); else armedCalibStart(); };
+$('calibBtn').onclick=()=>{
+    const now=performance.now();
+    if(now<calibBtnCooldown) return;                   // 完了直後2秒は押下無視（連打事故対策）
+    if(calibrating) finishCalibrate(now<finishArm); else armedCalibStart();
+};
 
 // ===== モデル退避スロット（磨き済みモデルの保護） =====
 const bakKey=()=>MODES[mode].modelKey+'_bak';
