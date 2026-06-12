@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.24.0';
+    const _V = 'd0.24.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.24.0</p>
+    <p style="color:#555;">d0.24.1</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
        　次に浅い角度で<b>回して→止める</b>で一周（<b>自動で完了</b>します）<br>
@@ -283,7 +283,7 @@ function onMotion(e){
     if(!a||a.x==null) return;
     const m=Math.hypot(a.x,a.y,a.z); if(m<0.1) return;
     const u=[a.x/m,a.y/m,a.z/m];
-    if(!gravCamUp){ gravCamUp=u; return; }
+    if(!gravCamUp){ gravCamUp=u; addLog('IMU重力を取得（トーは重力基準で計算されます）'); return; }
     for(let i=0;i<3;i++) gravCamUp[i]=gravCamUp[i]*0.95+u[i]*0.05;   // 手の振動を平滑
     const n=Math.hypot(gravCamUp[0],gravCamUp[1],gravCamUp[2])||1;
     for(let i=0;i<3;i++) gravCamUp[i]/=n;
@@ -1131,7 +1131,11 @@ function tryAutoConfirm(toe){
     if(sd<AUTO_SD_TH){
         autoLockout=now+4000;                              // 4秒ロックアウト（連続確定防止）
         const dStr=baseline!=null?` Δ${(mean-baseline>=0?'+':'')}${(mean-baseline).toFixed(2)}°`:'';
-        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定）`);
+        // 表示系の自動ログ: 基準とキャンバーも刻印（パネルを見ていなくてもログだけで判断できるように）
+        const d=_lastEstForRecord||{};
+        const bs=d.basis?`・${d.basis}基準`:'';
+        const cb=d.camA!=null?` キャンバーA:${d.camA.toFixed(2)}° B:${d.camB.toFixed(2)}°`:'';
+        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定${bs}${cb}）`);
         const dEl=$('s-delta'); const prev=dEl.style.color;
         dEl.style.transition='color 0.2s'; dEl.style.color='#34d058';
         setTimeout(()=>{ dEl.style.color=prev||''; dEl.style.transition=''; },800);
@@ -1181,6 +1185,16 @@ function renderCalibGuide(groups){
     $('lbl-sub2').textContent=''; $('s-resid').textContent='';
 }
 
+// 表示系の自動ログ: ステータスの変化をログに流す（パネルを見ていなくても追える・2026-06-12要望）
+let _lastStatusLog='', _statusLogT=0;
+function logStatus(txt){
+    const now=performance.now();
+    if(txt===_lastStatusLog) return;
+    if(now-_statusLogT<5000) return;                   // フリッカーでログが溢れないように5秒デバウンス
+    _lastStatusLog=txt; _statusLogT=now;
+    addLog(`状態: ${txt}`);
+}
+
 // 測定の合否ステータス: 「今の数値は信用していいか」を一目で
 function verdictFor(est, gkey){
     if(!est) return '<span class="bad">❌ ターゲットなし</span>';
@@ -1220,7 +1234,9 @@ function doMeasure(groups){
         // 片側だけ → 単体診断モード（1個のドデカで視点バイアスを直接測る）
         const g=a?'A':(b?'B':null), est=a||b;
         $('graph-wrap').style.display='none';              // 単体診断ではトーグラフは空＝目隠しなので消す
-        $('s-status').innerHTML=`${verdictFor(est, g||'A')} FPS${fps}`;
+        const vHtml=verdictFor(est, g||'A');
+        $('s-status').innerHTML=`${vHtml} FPS${fps}`;
+        logStatus(vHtml.replace(/<[^>]+>/g,''));
         if(est){
             const st=bodyStability(g);
             const viewDiff = refPose ? angBetween(refPose, est.R) : null;
@@ -1253,18 +1269,25 @@ function doMeasure(groups){
     // 重力が取れていれば重力基準（スピン不変）・なければ従来の本体基準にフォールバック
     const gt=gravCamUp?WMGeom.toeCamberGrav(a.R,b.R,gravCamUp):null;
     const toe=gt?gt.toe:toeYawBetween(a.R,b.R);
-    // 基準が切り替わるとトー値が不連続になる → ゼロ点は引き継がない
+    // 基準が切り替わるとトー値が不連続になる → ゼロ点は引き継がない。確定・切替は必ずログ
     const basis=gt?'重力':'本体';
-    if(_toeBasis&&_toeBasis!==basis&&baseline!=null){
-        baseline=null;
-        addLog(`⚠ トーの基準が${basis}基準に切り替わったためゼロ点を解除しました（再設定してください）`);
+    if(_toeBasis!==basis){
+        if(_toeBasis&&baseline!=null){
+            baseline=null;
+            addLog(`⚠ トーの基準が${basis}基準に切り替わったためゼロ点を解除しました（再設定してください）`);
+        }
+        addLog(basis==='重力'
+            ? 'トー計算: 重力基準（IMU OK・ボスのスピンに不変）'
+            : '⚠ トー計算: 本体基準（IMU重力なし・ボスのスピンで誤差が出る）');
+        _toeBasis=basis;
     }
-    _toeBasis=basis;
     const delta=baseline!=null?toe-baseline:null;
     $('graph-wrap').style.display='block';
     {
         const aOK=a.method&&a.method.startsWith('PnP'), bOK=b.method&&b.method.startsWith('PnP');
-        $('s-status').innerHTML=`<span class="${aOK&&bOK?'good':'mid'}">${aOK&&bOK?'✅':'🟡'} トー測定 A:${aOK?'PnP':'中心'} B:${bOK?'PnP':'中心'}</span> FPS${fps}`;
+        const st=`${aOK&&bOK?'✅':'🟡'} トー測定 A:${aOK?'PnP':'中心'} B:${bOK?'PnP':'中心'}`;
+        $('s-status').innerHTML=`<span class="${aOK&&bOK?'good':'mid'}">${st}</span> FPS${fps}`;
+        logStatus(st);
     }
     _lastEstForRecord={mode:'dual',facesA:a.faces,residA:a.residual,facesB:b.faces,residB:b.residual,toe,delta,
         basis, camA:gt?gt.camberA:null, camB:gt?gt.camberB:null};
