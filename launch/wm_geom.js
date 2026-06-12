@@ -219,6 +219,31 @@ function expSO3(w){
         [k[2]*k[0]*C-k[1]*s, k[2]*k[1]*C+k[0]*s, c+k[2]*k[2]*C]];
 }
 
+// --- 重力基準のトー/キャンバー分解 ---
+// Ra/Rb: 本体→カメラ回転。本体z軸（3列目）=ホイール軸。up: カメラ系の「上」（重力の逆・正規化済み）。
+// トー = 両軸を真の水平面（up直交面）へ射影した間の符号付き角（upまわり右ねじ）。
+// キャンバー = 各軸の対地仰角。
+// 軸ベクトルはボスのスピン（取付軸回りの回転）で不変 → 本体フレーム分解（旧toeYawBetween）の
+// 「A側スピンでキャンバー成分がトーに漏れる」問題がない（2026-06-12設計課題）。
+// 符号はモデル座標系のz向き（キャリブ依存・任意）に依る → 絶対値はクロッキング込み・Δで使う。
+// 戻り { toe, camberA, camberB }（度）。軸がほぼ鉛直でトー定義不能ならnull。
+function toeCamberGrav(Ra, Rb, up){
+    const ax=[Ra[0][2],Ra[1][2],Ra[2][2]], bx=[Rb[0][2],Rb[1][2],Rb[2][2]];
+    const proj=v=>{
+        const d=v[0]*up[0]+v[1]*up[1]+v[2]*up[2];
+        const p=[v[0]-d*up[0], v[1]-d*up[1], v[2]-d*up[2]];
+        const m=Math.hypot(p[0],p[1],p[2]);
+        return m>1e-9 ? [p[0]/m,p[1]/m,p[2]/m] : null;
+    };
+    const pa=proj(ax), pb=proj(bx);
+    if(!pa||!pb) return null;
+    const cr=[pa[1]*pb[2]-pa[2]*pb[1], pa[2]*pb[0]-pa[0]*pb[2], pa[0]*pb[1]-pa[1]*pb[0]];
+    const s=cr[0]*up[0]+cr[1]*up[1]+cr[2]*up[2];
+    const c=pa[0]*pb[0]+pa[1]*pb[1]+pa[2]*pb[2];
+    const elev=v=>Math.asin(Math.max(-1,Math.min(1, v[0]*up[0]+v[1]*up[1]+v[2]*up[2])))*180/Math.PI;
+    return { toe:Math.atan2(s,c)*180/Math.PI, camberA:elev(ax), camberB:elev(bx) };
+}
+
 // --- 回転間の角度（度）---
 function rotAngleDeg(A,B){
     const R=matMul3(matT3(A),B);
@@ -499,7 +524,7 @@ function buildBody(ids, frames){
 
 const api={ reconstruct, hornPose, hornPoseRobust, buildBody, chiralityResidual, mirrorPos, jacobiEigen4, quatToMat, solve3, dvec,
     pnpRefine, expSO3, rotAngleDeg, avgRotGS, pickStableRotation, solveN, matMul3, matT3, matVec3,
-    projectK, baRefine, baRms, refineTagGeom, refineK1 };
+    projectK, baRefine, baRms, refineTagGeom, refineK1, toeCamberGrav };
 if(typeof module!=='undefined' && module.exports) module.exports=api;
 else root.WMGeom=api;
 

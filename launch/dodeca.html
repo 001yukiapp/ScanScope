@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.23.0';
+    const _V = 'd0.24.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.23.0</p>
+    <p style="color:#555;">d0.24.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
        　次に浅い角度で<b>回して→止める</b>で一周（<b>自動で完了</b>します）<br>
@@ -133,7 +133,7 @@
     <div id="log-panel"></div>
 </div>
 
-<script src="./wm_geom.js?v=d0210"></script>
+<script src="./wm_geom.js?v=d0240"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -272,6 +272,33 @@ function toeYawBetween(Ra,Rb){
     return Math.atan2(nA[0],nA[2])*180/Math.PI;
 }
 
+// ===== IMU重力（重力基準トー分解用・camber.htmlの確定パターン） =====
+// 旧toeYawBetween（本体フレーム分解）はA側ボスのスピン（取付軸回り回転）でキャンバー成分が
+// トーに漏れる（合成テスト: キャンバー1.5°×スピン±30°で1.3°漏れ）。重力で水平面を定義し
+// 両軸を射影すれば両スピンに完全不変（grav_toe_test.js 全PASS・誤差1e-15）。
+// gravToCamera(g)=[-gx,-gy,-gz]が「カメラ系の下」→ 上 up=[gx,gy,gz]/|g|
+let gravCamUp=null, _toeBasis=null;                    // カメラ系の「上」（EMA平滑・正規化）
+function onMotion(e){
+    const a=e.accelerationIncludingGravity;
+    if(!a||a.x==null) return;
+    const m=Math.hypot(a.x,a.y,a.z); if(m<0.1) return;
+    const u=[a.x/m,a.y/m,a.z/m];
+    if(!gravCamUp){ gravCamUp=u; return; }
+    for(let i=0;i<3;i++) gravCamUp[i]=gravCamUp[i]*0.95+u[i]*0.05;   // 手の振動を平滑
+    const n=Math.hypot(gravCamUp[0],gravCamUp[1],gravCamUp[2])||1;
+    for(let i=0;i<3;i++) gravCamUp[i]/=n;
+}
+async function requestMotion(){
+    try{
+        if(typeof DeviceMotionEvent!=='undefined' && typeof DeviceMotionEvent.requestPermission==='function'){
+            if(await DeviceMotionEvent.requestPermission()!=='granted'){
+                addLog('⚠ モーション許可なし: トーは本体基準（ボスのスピンで誤差が出る）で計算します'); return;
+            }
+        }
+        window.addEventListener('devicemotion', onMotion);
+    }catch(e){ addLog('⚠ IMU取得失敗: トーは本体基準で計算します'); }
+}
+
 // ===== タグ品質 =====
 const MIN_TAG_PX = 70;
 function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
@@ -280,6 +307,7 @@ function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i]
 async function init(){
     $('start-screen').style.display='none';
     $('loading').style.display='flex';
+    requestMotion();                                   // ボタン押下の文脈で許可を取る（iOS要件）
     try{
         const Module=await AprilTagWasm();
         const _init=Module.cwrap('atagjs_init','number',[]);
@@ -1038,7 +1066,8 @@ function startRecord(){
             recordLog.push(`[+${el}s] 単体診断${diagCfgStr()} | 見えてる面:${d.faces}${pn} Horn残差:${d.residual.toFixed(1)}mm${st}${vd}${d.dist!=null?` 距離:${d.dist}cm`:''} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
         } else {
             const dstr=d.delta!=null?` Δトー:${d.delta>=0?'+':''}${d.delta.toFixed(2)}°`:'';
-            recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°${dstr} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
+            const cbstr=d.camA!=null?` キャンバーA:${d.camA.toFixed(2)}° B:${d.camB.toFixed(2)}°`:'';
+            recordLog.push(`[+${el}s] トー測定${diagCfgStr()} | 前A:${d.facesA}面残差${d.residA.toFixed(1)}mm 後B:${d.facesB}面残差${d.residB.toFixed(1)}mm 絶対トー角:${d.toe.toFixed(2)}°(${d.basis||'本体'}基準)${dstr}${cbstr} FPS:${fps}${videoFrozen?' ⚠映像停止':''}`);
         }
     },500);
 }
@@ -1221,14 +1250,24 @@ function doMeasure(groups){
         }
         return;
     }
-    const toe=toeYawBetween(a.R,b.R);
+    // 重力が取れていれば重力基準（スピン不変）・なければ従来の本体基準にフォールバック
+    const gt=gravCamUp?WMGeom.toeCamberGrav(a.R,b.R,gravCamUp):null;
+    const toe=gt?gt.toe:toeYawBetween(a.R,b.R);
+    // 基準が切り替わるとトー値が不連続になる → ゼロ点は引き継がない
+    const basis=gt?'重力':'本体';
+    if(_toeBasis&&_toeBasis!==basis&&baseline!=null){
+        baseline=null;
+        addLog(`⚠ トーの基準が${basis}基準に切り替わったためゼロ点を解除しました（再設定してください）`);
+    }
+    _toeBasis=basis;
     const delta=baseline!=null?toe-baseline:null;
     $('graph-wrap').style.display='block';
     {
         const aOK=a.method&&a.method.startsWith('PnP'), bOK=b.method&&b.method.startsWith('PnP');
         $('s-status').innerHTML=`<span class="${aOK&&bOK?'good':'mid'}">${aOK&&bOK?'✅':'🟡'} トー測定 A:${aOK?'PnP':'中心'} B:${bOK?'PnP':'中心'}</span> FPS${fps}`;
     }
-    _lastEstForRecord={mode:'dual',facesA:a.faces,residA:a.residual,facesB:b.faces,residB:b.residual,toe,delta};
+    _lastEstForRecord={mode:'dual',facesA:a.faces,residA:a.residual,facesB:b.faces,residB:b.residual,toe,delta,
+        basis, camA:gt?gt.camberA:null, camB:gt?gt.camberB:null};
 
     // Δ＝変化量（ゼロ点基準）
     $('lbl-main').textContent='Δトー＝ゼロ点基準の変化量（前後ターゲット間ヨー差の増減）';
@@ -1240,7 +1279,9 @@ function doMeasure(groups){
         dEl.textContent='ゼロ点未設定';
         dEl.className='val mid';
     }
-    $('lbl-sub1').textContent='絶対トー角＝前後ターゲット本体フレーム間のヨー差・カメラ位置に依存しない';
+    $('lbl-sub1').textContent=gt
+        ? `絶対トー角（重力基準・スピン不変）｜キャンバー A${gt.camberA>=0?'+':''}${gt.camberA.toFixed(2)}° B${gt.camberB>=0?'+':''}${gt.camberB.toFixed(2)}°`
+        : '絶対トー角（本体基準・IMUなし＝ボスのスピンで誤差が出る）';
     $('s-toe').textContent=toe.toFixed(2)+'°';
     $('lbl-sub2').textContent=`ゼロ点 / Horn残差（前A${a.total>a.faces?` 除${a.total-a.faces}`:''}・後B${b.total>b.faces?` 除${b.total-b.faces}`:''}）`;
     // s-toe-sd は tryAutoConfirm がσ値で上書きするので初期値のみ設定
