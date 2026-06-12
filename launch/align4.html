@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.10.0';
+    const _V = 'a0.10.1';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.10.0</p>
+    <p style="color:#555;">a0.10.1</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -558,7 +558,7 @@ function toggleLock(){
     if (fm && Math.abs((fm.k1||0) - camK1) > 0.02)
         addLog('⚠ 床マップが現在のk1と違う設定で学習されています。「床消去」→「床キャリブ」をやり直してください');
     const nP=bodyModel?Object.keys(bodyModel).length:0, nQ=bodyQ?Object.keys(bodyQ).length:0;
-    addLog(`[条件] APP:align4 ${_V} ターゲット:${target.label} タグ${target.size!=null?'側面55/上面80mm':$('tagSizeInput').value+'mm'} モデル${nP}面/向き${nQ}面 k1:${camK1.toFixed(4)} 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
+    addLog(`[条件] APP:align4 ${_V} ターゲット:${target.label} タグ${target.size!=null?'側面55/上面80mm':$('tagSizeInput').value+'mm'} モデル${nP}面/向き${nQ}面 k1:${camK1.toFixed(4)} 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm${fm.size?` 黒部${(fm.size*1000).toFixed(0)}mm`:''} (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
     addLog('✅ 世界姿勢ロック（15フレーム平均）。各視点で静止→「視点記録」を押す。0.5°以内=視点バイアス相殺の実証。');
 }
 
@@ -738,6 +738,7 @@ async function startCamera() {
     for (let i = target.idMin; i <= target.idMax; i++) detector.set_tag_size(i, wheelTagSizeM(i));
     for (const id of FLOOR_IDS) detector.set_tag_size(id, FLOOR_TAG_SIZE);
     addLog(`ターゲット: ${target.label}（ID${target.idMin}〜${target.idMax}）・床タグ黒部${(FLOOR_TAG_SIZE*1000).toFixed(1)}mm`);
+    acquireWakeLock();
     // 保存済み床マップが別サイズで学習されていたらスケールが狂う → 作り直しを要求
     try{
         const fm=JSON.parse(localStorage.getItem('scanscope_floor_meta')||'null');
@@ -748,6 +749,19 @@ async function startCamera() {
     $('main').style.display = 'block';
     requestAnimationFrame(loop);
 }
+
+// ===== 画面スリープ防止（iOS 16.4+。スリープでカメラ停止する事故対策・復帰時に取り直し）=====
+let wakeLock=null;
+async function acquireWakeLock(){
+    try{
+        if(!('wakeLock' in navigator)) return;
+        wakeLock=await navigator.wakeLock.request('screen');
+        addLog('画面スリープ防止ON');
+    }catch(e){}
+}
+document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible'&&detector) acquireWakeLock();
+});
 
 // ===== メインループ =====
 function loop() {
