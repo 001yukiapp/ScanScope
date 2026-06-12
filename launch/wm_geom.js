@@ -219,16 +219,41 @@ function expSO3(w){
         [k[2]*k[0]*C-k[1]*s, k[2]*k[1]*C+k[0]*s, c+k[2]*k[2]*C]];
 }
 
+// --- リング状タグ中心から本体の対称軸（回転軸）を推定 ---
+// pts: リングのタグ中心（本体系・物理的な並び順）。円周上の点列なのでNewell法
+// （隣接ペアの外積和）で円の法線＝対称軸が出る。3点以上必要。
+// モデルのz軸はキャリブの種3面が作る人工フレームで、真の対称軸から数度ズレる
+// （2026-06-12実測: スピンでトーが±7°振れた＝ズレ約7°）。トー分解はこの軸を使うこと。
+function ringAxis(pts){
+    if(!pts || pts.length<3) return null;
+    const c=[0,0,0];
+    for(const p of pts) for(let k=0;k<3;k++) c[k]+=p[k]/pts.length;
+    const n=[0,0,0];
+    for(let i=0;i<pts.length;i++){
+        const a=pts[i], b=pts[(i+1)%pts.length];
+        const u=[a[0]-c[0],a[1]-c[1],a[2]-c[2]], v=[b[0]-c[0],b[1]-c[1],b[2]-c[2]];
+        n[0]+=u[1]*v[2]-u[2]*v[1]; n[1]+=u[2]*v[0]-u[0]*v[2]; n[2]+=u[0]*v[1]-u[1]*v[0];
+    }
+    const m=Math.hypot(n[0],n[1],n[2]);
+    return m>1e-12 ? [n[0]/m,n[1]/m,n[2]/m] : null;
+}
+
 // --- 重力基準のトー/キャンバー分解 ---
-// Ra/Rb: 本体→カメラ回転。本体z軸（3列目）=ホイール軸。up: カメラ系の「上」（重力の逆・正規化済み）。
+// Ra/Rb: 本体→カメラ回転。axA/axB: ホイール軸（本体系・省略時はz軸）。
+// up: カメラ系の「上」（重力の逆・正規化済み）。
 // トー = 両軸を真の水平面（up直交面）へ射影した間の符号付き角（upまわり右ねじ）。
 // キャンバー = 各軸の対地仰角。
 // 軸ベクトルはボスのスピン（取付軸回りの回転）で不変 → 本体フレーム分解（旧toeYawBetween）の
 // 「A側スピンでキャンバー成分がトーに漏れる」問題がない（2026-06-12設計課題）。
-// 符号はモデル座標系のz向き（キャリブ依存・任意）に依る → 絶対値はクロッキング込み・Δで使う。
+// ⚠ axにはringAxis（真の対称軸）を渡すこと。z軸のままだとキャリブの人工フレームの
+// ズレ分だけスピンでトーが振れる（2026-06-12実測±7°）。
 // 戻り { toe, camberA, camberB }（度）。軸がほぼ鉛直でトー定義不能ならnull。
-function toeCamberGrav(Ra, Rb, up){
-    const ax=[Ra[0][2],Ra[1][2],Ra[2][2]], bx=[Rb[0][2],Rb[1][2],Rb[2][2]];
+function toeCamberGrav(Ra, Rb, up, axA, axB){
+    const rot=(R,v)=>[
+        R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2],
+        R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2],
+        R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]];
+    const ax=rot(Ra, axA||[0,0,1]), bx=rot(Rb, axB||[0,0,1]);
     const proj=v=>{
         const d=v[0]*up[0]+v[1]*up[1]+v[2]*up[2];
         const p=[v[0]-d*up[0], v[1]-d*up[1], v[2]-d*up[2]];
@@ -524,7 +549,7 @@ function buildBody(ids, frames){
 
 const api={ reconstruct, hornPose, hornPoseRobust, buildBody, chiralityResidual, mirrorPos, jacobiEigen4, quatToMat, solve3, dvec,
     pnpRefine, expSO3, rotAngleDeg, avgRotGS, pickStableRotation, solveN, matMul3, matT3, matVec3,
-    projectK, baRefine, baRms, refineTagGeom, refineK1, toeCamberGrav };
+    projectK, baRefine, baRms, refineTagGeom, refineK1, toeCamberGrav, ringAxis };
 if(typeof module!=='undefined' && module.exports) module.exports=api;
 else root.WMGeom=api;
 

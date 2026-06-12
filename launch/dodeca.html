@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.24.1';
+    const _V = 'd0.25.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.24.1</p>
+    <p style="color:#555;">d0.25.0</p>
     <p>前後2個のファセットボスターゲットで<br>トーの<b>変化量</b>を測定します。<br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
        　次に浅い角度で<b>回して→止める</b>で一周（<b>自動で完了</b>します）<br>
@@ -133,7 +133,7 @@
     <div id="log-panel"></div>
 </div>
 
-<script src="./wm_geom.js?v=d0240"></script>
+<script src="./wm_geom.js?v=d0250"></script>
 <script src="./apriltag_wasm.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -297,6 +297,34 @@ async function requestMotion(){
         }
         window.addEventListener('devicemotion', onMotion);
     }catch(e){ addLog('⚠ IMU取得失敗: トーは本体基準で計算します'); }
+}
+
+// ===== 本体のホイール軸（対称軸）推定 =====
+// モデル座標系はキャリブの種3面が作る人工フレームで、z軸は真の対称軸から数度ズレる
+// （2026-06-12実機: スピンでトーが14°振れた＝ズレ約7°。合成テスト: 8°ズレ→振れ16°）。
+// リングタグ中心は物理的に「対称軸に垂直な円」上に並ぶので、その法線＝真のホイール軸。
+// 上面タグ側を正に統一（キャンバー符号も安定）。facetモード専用（diagはリング構造でない）。
+const _axisCache={};
+function bodyAxis(g){
+    if(mode!=='facet') return null;
+    const grp=GROUPS.find(x=>x.key===g); const P=(model[g]||{}).P;
+    if(!grp||!P) return null;
+    const ringIds=[]; for(let i=grp.idMin+1;i<=grp.idMax;i++) if(P[i]) ringIds.push(i);
+    if(ringIds.length<3) return null;
+    const sig=ringIds.map(i=>P[i].map(v=>v.toFixed(4)).join(',')).join(';');
+    const c=_axisCache[g];
+    if(c && c.sig===sig) return c.axis;
+    let n=WMGeom.ringAxis(ringIds.map(i=>P[i]));
+    if(!n) return null;
+    const top=P[grp.idMin];
+    if(top){
+        const cen=[0,0,0]; ringIds.forEach(i=>{for(let k=0;k<3;k++)cen[k]+=P[i][k]/ringIds.length;});
+        if((top[0]-cen[0])*n[0]+(top[1]-cen[1])*n[1]+(top[2]-cen[2])*n[2] < 0) n=[-n[0],-n[1],-n[2]];
+    }
+    _axisCache[g]={sig, axis:n};
+    const devRaw=Math.acos(Math.max(-1,Math.min(1,n[2])))*180/Math.PI;
+    addLog(`[${g}] ホイール軸を推定: リング${ringIds.length}面の円フィット（モデルz軸とのズレ${Math.min(devRaw,180-devRaw).toFixed(1)}°）`);
+    return n;
 }
 
 // ===== タグ品質 =====
@@ -1267,7 +1295,8 @@ function doMeasure(groups){
         return;
     }
     // 重力が取れていれば重力基準（スピン不変）・なければ従来の本体基準にフォールバック
-    const gt=gravCamUp?WMGeom.toeCamberGrav(a.R,b.R,gravCamUp):null;
+    // 軸はモデルz軸でなくリングフィットの真のホイール軸（スピンでトーが振れる事故対策）
+    const gt=gravCamUp?WMGeom.toeCamberGrav(a.R,b.R,gravCamUp,bodyAxis('A'),bodyAxis('B')):null;
     const toe=gt?gt.toe:toeYawBetween(a.R,b.R);
     // 基準が切り替わるとトー値が不連続になる → ゼロ点は引き継がない。確定・切替は必ずログ
     const basis=gt?'重力':'本体';
