@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.26.0';
+    const _V = 'd0.27.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.26.0</p>
+    <p style="color:#555;">d0.27.0</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -124,6 +124,8 @@
             <button id="saveModelBtn" class="sec">モデル保存</button>
             <button id="loadModelBtn" class="sec">復元</button>
             <button id="resetBtn" class="sec">学習消去</button>
+            <input id="voiceTargetInput" type="number" step="0.05" placeholder="目標Δ°" style="width:68px;padding:6px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:13px;text-align:center;">
+            <button id="voiceBtn" class="sec">音声ガイド</button>
         </span>
     </div>
 
@@ -781,6 +783,7 @@ $('baBtn').onclick=()=>{
                 const Qs=model[g].Qs||{};
                 for(const id of Object.keys(r.Q)) Qs[id]=0.99;   // コーナー実測で精錬済み＝高信頼扱い
                 model[g].Qs=Qs; saveModel();
+                const k1Prev=camK1;
                 camK1=r.k1; localStorage.setItem('scanscope_k1', String(camK1));
                 GROUPS.forEach(x=>{ qAcc[x.key]={}; qObs[x.key]={}; pnpEma[x.key]={}; pnpView[x.key]={}; bodyHist[x.key].length=0; });
                 baRunAt[g]=baObs[g].length;
@@ -788,6 +791,8 @@ $('baBtn').onclick=()=>{
                 // 真のk1≈0が実測済み（iPhoneは動画パイプラインで歪み補正済み。A:-0.001/B:+0.010）。
                 // 大きいk1は観測の偏りが作る偽解で、P/Qを歪ませ視点依存バイアスになる（6/12朝の事件）
                 if(Math.abs(r.k1)>0.05) addLog(`⚠ |k1|=${Math.abs(r.k1).toFixed(3)}は大きすぎる（真値≈0の実績）。偽解の疑い→視点・距離・画面位置を広げて観測を追加し再精錬を推奨`);
+                // k1漂流の早期警告（6/12夕方: 屋外で-0.012→+0.014→+0.041と漂流。影ちらつきの悪観測混入が疑い）
+                else if(Math.abs(r.k1-k1Prev)>0.02) addLog(`⚠ k1が前回から${(r.k1-k1Prev)>=0?'+':''}${(r.k1-k1Prev).toFixed(3)}動きました（悪観測混入の疑い・屋外の影ちらつき等）。値に納得いかなければ「復元」で戻せます`);
             }
         }catch(e){ addLog('❌ 精錬エラー: '+e.message); }
         btn.textContent=`精錬(${baObs[g].length})`; btn.disabled=false;
@@ -1098,10 +1103,13 @@ function startRecord(){
     btn.onclick=()=>stopRecord();
     $('log-title').textContent='記録中…';
     addLog(`=== 記録開始 ${new Date().toLocaleTimeString()} ===`);
+    recNoTgt=null;
     recordTimer=setInterval(()=>{
         const el=((performance.now()-recordStart)/1000).toFixed(1);
         const d=_lastEstForRecord;
-        if(!d){ recordLog.push(`[+${el}s] ターゲットなし`); return; }
+        // 連続「ターゲットなし」は1行に圧縮（付け外し作業中・1回30〜70秒でログが爆発する対策）
+        if(!d){ if(!recNoTgt) recNoTgt={t0:el,n:0}; recNoTgt.t1=el; recNoTgt.n++; return; }
+        flushRecNoTgt();
         if(d.mode==='single'){
             const vd=d.viewDiff!=null?` 視点差分:${d.viewDiff.toFixed(2)}°${refPose?'[ロック]':''}`:' 視点ロックなし';
             const st=d.stability!=null?` 姿勢ブレ:${d.stability.toFixed(2)}°`:'';
@@ -1116,8 +1124,17 @@ function startRecord(){
     },500);
 }
 
+let recNoTgt=null;
+function flushRecNoTgt(){
+    if(!recNoTgt) return;
+    recordLog.push(recNoTgt.n>1
+        ? `[+${recNoTgt.t0}s〜+${recNoTgt.t1}s] ターゲットなし ×${recNoTgt.n}`
+        : `[+${recNoTgt.t0}s] ターゲットなし`);
+    recNoTgt=null;
+}
+
 function stopRecord(){
-    clearInterval(recordTimer); recording=false;
+    clearInterval(recordTimer); recording=false; flushRecNoTgt();
     const dur=((performance.now()-recordStart)/1000).toFixed(1);
     $('log-title').textContent=`ログ（${recordLog.length}件）`;
     // サマリ計算
@@ -1183,10 +1200,21 @@ function tryAutoConfirm(toe){
         const d=_lastEstForRecord||{};
         const bs=d.basis?`・${d.basis}基準`:'';
         const cb=d.camA!=null?(d.camB!=null?` キャンバーA:${d.camA.toFixed(2)}° B:${d.camB.toFixed(2)}°`:` キャンバー:${d.camA.toFixed(2)}°`):'';
-        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定${bs}${cb}）`);
+        // 品質刻印: H1で確定した採用ルール（PnP6面以上・σ0.05以下）を自動判定（6/12）
+        const faces=d.mode==='single'?d.faces:(d.mode==='dual'?Math.min(d.facesA,d.facesB):null);
+        const pnpOK=d.mode==='single'?!!(d.method&&d.method.startsWith('PnP')):true;
+        const lowQ=(faces!=null&&faces<6)||!pnpOK||sd>0.05;
+        const fStr=faces!=null?`・${faces}面${pnpOK?'':'中心'}`:'';
+        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定${bs}${fStr}${cb}）${lowQ?' ⚠低信頼→採用しない（6面未満/中心法/σ>0.05）':''}`);
         const dEl=$('s-delta'); const prev=dEl.style.color;
         dEl.style.transition='color 0.2s'; dEl.style.color='#34d058';
         setTimeout(()=>{ dEl.style.color=prev||''; dEl.style.transition=''; },800);
+        // 音声ガイド: σ安定の確定値だけ読み上げ（低信頼はスキップ＝誤誘導しない）
+        if(voiceTarget!=null&&baseline!=null&&!lowQ){
+            const rem=voiceTarget-(mean-baseline);
+            if(Math.abs(rem)<=VOICE_TOL) speak('オーケー。そこで固定');
+            else speak(`あと${rem>0?'プラス':'マイナス'}${Math.abs(rem).toFixed(2)}`);
+        }
         autoToeHist=[];
     }
 }
@@ -1490,11 +1518,16 @@ function finishMeasure(){
 }
 
 // ゼロ点設定：直近の安定値（中央値）を基準に採用
+// 安定ゲート: 移動・付け直しの直後に押すと遷移中の値を掴む事故対策（6/12実測: 表示145°でゼロ152°）
 function setZero(){
-    if(hist.length<10){ addLog('ゼロ点失敗: もう少し映してから'); return; }
+    if(hist.length<AUTO_WIN){ addLog('ゼロ点失敗: もう少し映してから'); return; }
+    const recent=hist.slice(-AUTO_WIN);
+    const m=recent.reduce((s,v)=>s+v,0)/recent.length;
+    const sd=Math.sqrt(recent.reduce((s,v)=>s+(v-m)**2,0)/recent.length);
+    if(sd>AUTO_SD_TH){ addLog(`ゼロ点失敗: 値が安定していません（σ${sd.toFixed(2)}°）。静止して数秒待ってから`); return; }
     baseline = medOf(hist.slice(-60));
     saveBaseline();
-    addLog(`ゼロ点設定: ${baseline.toFixed(2)}°（以後はここからのΔを表示）`);
+    addLog(`ゼロ点設定: ${baseline.toFixed(2)}°（σ${sd.toFixed(2)}°・以後はここからのΔを表示）`);
 }
 
 // 全ログの時系列アーカイブ（「ログ全コピー」用。パネルは新しい順・コピーは古い順）
@@ -1619,6 +1652,33 @@ $('lockBtn').onclick=()=>{
     addLog(`視点ロック（安定${bodyStability(g).toFixed(2)}°）: カメラを左右に動かして視点差分を確認。1°未満なら視点バイアス消失。`);
 };
 $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点を解除しました'); };
+
+// ===== 音声ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
+// σ安定の自動確定ごとに「目標Δまでの残り」を読み上げる。±VOICE_TOLに入ったら「OK固定」。
+// iOS制約: 音声はユーザー操作起点が必須→開始ボタンのクリックで初回発話してアンロック。画面スリープで止まる。
+const VOICE_TOL=0.05;
+let voiceTarget=null;
+function speak(text){
+    try{
+        const u=new SpeechSynthesisUtterance(text);
+        u.lang='ja-JP'; u.rate=1.1;
+        speechSynthesis.cancel();                          // 読み上げが渋滞しないよう最新だけ
+        speechSynthesis.speak(u);
+    }catch(e){}
+}
+$('voiceBtn').onclick=()=>{
+    if(voiceTarget!=null){
+        voiceTarget=null; $('voiceBtn').textContent='音声ガイド';
+        speak('音声ガイドを停止しました'); addLog('音声ガイド停止');
+        return;
+    }
+    const v=parseFloat($('voiceTargetInput').value);
+    if(isNaN(v)){ addLog('音声ガイド: 隣の欄に目標Δ（度）を入れてから押してください（例: -0.20）'); return; }
+    if(baseline==null){ addLog('音声ガイド: 先にゼロ点を設定してください（Δの基準が必要）'); return; }
+    voiceTarget=v; $('voiceBtn').textContent='音声停止';
+    speak(`音声ガイド開始。目標、${v>0?'プラス':v<0?'マイナス':''}${Math.abs(v).toFixed(2)}度`);
+    addLog(`🔊 音声ガイド開始: 目標Δ${v>=0?'+':''}${v.toFixed(2)}°（σ安定の確定ごとに残りを読み上げ・±${VOICE_TOL}°でOK通知・画面スリープで停止します）`);
+};
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
 $('recordBtn').textContent='記録開始';
