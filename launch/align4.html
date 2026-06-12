@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.8.1';
+    const _V = 'a0.9.0';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.8.1</p>
+    <p style="color:#555;">a0.9.0</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -320,7 +320,7 @@ function finishFloorCalib(){
         dists.push(`${ids[i]}-${ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`);
     }
     localStorage.setItem('scanscope_floor_meta', JSON.stringify({
-        rms:+medRms.toFixed(1), planar:+(maxOff*1000).toFixed(1),
+        rms:+medRms.toFixed(1), planar:+(maxOff*1000).toFixed(1), k1:+camK1.toFixed(4),
         at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
     }));
     addLog(`✅ 床マップ学習: ${ids.length}枚 残差中央${medRms.toFixed(1)}mm 平面度${(maxOff*1000).toFixed(1)}mm${failed.length?` 欠${failed.length}`:''}`);
@@ -332,6 +332,20 @@ function clearFloor(){
     localStorage.removeItem('scanscope_floor_world');
     localStorage.removeItem('scanscope_floor_meta');
     addLog('床マップを消去しました');
+}
+
+// ===== 床タグ位置のk1補正 =====
+// 検出器のpose.tは歪み未補正のホモグラフィ由来。ボス側はk1込みコーナーPnPで補正されるため、
+// 床側を生のまま使うと世界座標系がタグの画面内位置（＝カメラ高さ・方位）に応じて傾き、
+// そのまま視点差分に化ける（実測: H37→80cmで1→26°・方位±30°で4〜7.5°。
+// 合成テスト floor_k1_test.js: raw=10.2° / 補正=0.0°）。コーナー4点＋k1込みPnPで出し直す。
+function floorK1T(d){
+    if (!camK1) return d.pose.t;                       // k1未推定（精錬前）は従来どおり
+    const Xl = TAG_LOCAL(FLOOR_TAG_SIZE/2);
+    const ord = resolveCornerOrderA(Xl, d.corners.map(c=>[c.x,c.y]), d.pose.R, d.pose.t);
+    if (!ord) return d.pose.t;
+    const ref = WMGeom.pnpRefine(Xl, ord, camK(), d.pose.R, d.pose.t, 10);
+    return (ref && ref.rmsPx < Math.max(10, tagPx(d)*0.15)) ? ref.t : d.pose.t;
 }
 
 // ===== カメラ自己位置推定（床タグから）=====
@@ -526,6 +540,9 @@ function toggleLock(){
     btn.textContent='ロック解除'; btn.className='green';
     // テスト条件をログに固定（コピーしたログだけで条件が再現できるように）
     let fm=null; try{ fm=JSON.parse(localStorage.getItem('scanscope_floor_meta')); }catch(e){}
+    // 床マップが今と違うk1で学習されていたら座標系が混ざる（k1補正の有無も含む）→ 作り直しを要求
+    if (fm && Math.abs((fm.k1||0) - camK1) > 0.02)
+        addLog('⚠ 床マップが現在のk1と違う設定で学習されています。「床消去」→「床キャリブ」をやり直してください');
     const nP=bodyModel?Object.keys(bodyModel).length:0, nQ=bodyQ?Object.keys(bodyQ).length:0;
     addLog(`[条件] APP:align4 ${_V} ターゲット:${target.label} タグ${target.size!=null?'側面55/上面80mm':$('tagSizeInput').value+'mm'} モデル${nP}面/向き${nQ}面 k1:${camK1.toFixed(4)} 床:${fm?`残差${fm.rms}mm 平面度${fm.planar}mm (${fm.at})`:'メタなし(旧キャリブ)'} 解像度${overlay.width}x${overlay.height}`);
     addLog('✅ 世界姿勢ロック（15フレーム平均）。各視点で静止→「視点記録」を押す。0.5°以内=視点バイアス相殺の実証。');
@@ -740,16 +757,19 @@ function process() {
     floorDets.forEach(d => drawTag(d, '#ffd700'));
     wheelDets.forEach(d => drawTag(d, '#00ff00'));
 
+    // 床タグ位置（k1補正済み・キャリブと自己位置で共用）
+    const floorT = {}; for (const d of floorDets) floorT[d.id] = floorK1T(d);
+
     // 床キャリブ中: タグ中心位置を収集
     if (floorCalibrating && floorDets.length >= 2) {
-        const fr = {}; for (const d of floorDets) fr[d.id] = d.pose.t;
+        const fr = {}; for (const d of floorDets) fr[d.id] = floorT[d.id];
         floorCalibFrames.push(fr);
     }
 
     // カメラ自己位置（床タグから）
     let cameraPose = null;
     if (floorDets.length >= 3) {
-        const visible = floorDets.map(d => ({ id: d.id, t: d.pose.t }));
+        const visible = floorDets.map(d => ({ id: d.id, t: floorT[d.id] }));
         cameraPose = localizeCamera(visible);
     }
 
