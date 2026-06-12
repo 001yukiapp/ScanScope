@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.29.1';
+    const _V = 'd0.29.2';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.29.1</p>
+    <p style="color:#555;">d0.29.2</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -1687,43 +1687,45 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 // ===== ビープ音ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
 // σ安定の自動確定ごとにビープ間隔でΔ残量を伝える。
 // 近づく→間隔短縮(ピ ピ ピ) / ±0.05°以内→長音(ピーーー) / 行き過ぎ→低音(ポーン ポーン)
-// iOSはユーザー操作起点でサイレントバッファを再生してアンロックしないとsetTimeout内の発音がブロックされる
+// iOSの消音スイッチはWeb Audioを殺すがHTML5 audioの媒体再生は通す → WAVを合成して<audio>で鳴らす
 const VOICE_TOL=0.05;
 let voiceTarget=null;
-let _audioCtx=null;
-let _audioUnlocked=false;
 let _beepTimer=null;
 
+// 16bit PCM WAVをdata無しのBlob URLとして合成（freq Hz・dur ms・正弦波、減衰エンベロープ付き）
+function _makeToneWav(freq, dur, type='sine'){
+    const sr=22050, n=Math.round(sr*dur/1000);
+    const buf=new ArrayBuffer(44+n*2), dv=new DataView(buf);
+    const wstr=(off,s)=>{ for(let i=0;i<s.length;i++) dv.setUint8(off+i,s.charCodeAt(i)); };
+    wstr(0,'RIFF'); dv.setUint32(4,36+n*2,true); wstr(8,'WAVE');
+    wstr(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+    dv.setUint32(24,sr,true); dv.setUint32(28,sr*2,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+    wstr(36,'data'); dv.setUint32(40,n*2,true);
+    for(let i=0;i<n;i++){
+        const t=i/sr, ph=2*Math.PI*freq*t;
+        let s=Math.sin(ph);
+        if(type==='triangle') s=2/Math.PI*Math.asin(Math.sin(ph));
+        const env=Math.min(1, i/(sr*0.005)) * Math.exp(-3*i/n); // クリック防止アタック＋減衰
+        const v=Math.max(-1,Math.min(1, s*env*0.8));
+        dv.setInt16(44+i*2, v*32767, true);
+    }
+    return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
+}
+// 3種の音を起動時に1回だけ合成（Audio要素を使い回す＝再生のたびのGC/ロード回避）
+const _sndOK=new Audio(_makeToneWav(880,600));          // ピーーー（OK）
+const _sndPi=new Audio(_makeToneWav(1000,80));          // ピ（近づき）
+const _sndPo=new Audio(_makeToneWav(330,350,'triangle')); // ポーン（行き過ぎ）
+for(const a of [_sndOK,_sndPi,_sndPo]){ a.preload='auto'; a.setAttribute('playsinline',''); }
+function _playSnd(a){ try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){} }
 function _unlockAudio(){
-    if(_audioUnlocked) return;
-    if(!_audioCtx) _audioCtx=new (window.AudioContext||window.webkitAudioContext)();
-    try{
-        // サイレントバッファ再生でiOSのAudioContextをアンロック（user gesture内で必須）
-        const buf=_audioCtx.createBuffer(1,1,22050);
-        const src=_audioCtx.createBufferSource();
-        src.buffer=buf; src.connect(_audioCtx.destination); src.start(0);
-        _audioUnlocked=true;
-    }catch(e){}
-    _audioCtx.resume().catch(()=>{});
+    // user gesture内で3種とも一度play→即pause（iOSのaudio要素は操作起点の再生実績が必要）
+    for(const a of [_sndOK,_sndPi,_sndPo]){
+        try{ a.muted=true; a.play().then(()=>{ a.pause(); a.currentTime=0; a.muted=false; }).catch(()=>{ a.muted=false; }); }catch(e){}
+    }
 }
-function _playTone(freq, dur, type='sine'){
-    if(!_audioCtx||!_audioUnlocked) return;
-    try{
-        const ctx=_audioCtx;
-        if(ctx.state==='suspended') ctx.resume().catch(()=>{});
-        const t=ctx.currentTime+0.02; // iOSは少し先のtimeを指定しないと無音になる場合あり
-        const osc=ctx.createOscillator();
-        const gain=ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
-        osc.type=type; osc.frequency.value=freq;
-        gain.gain.setValueAtTime(0.35, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t+dur/1000);
-        osc.start(t); osc.stop(t+dur/1000);
-    }catch(e){}
-}
-function _beepOK(){ _playTone(880,600); }           // ピーーー（OK）
-function _beepApproach(){ _playTone(1000,70); }     // ピ（近づき）
-function _beepOver(){ _playTone(330,300,'triangle'); } // ポーン（行き過ぎ）
+function _beepOK(){ _playSnd(_sndOK); }
+function _beepApproach(){ _playSnd(_sndPi); }
+function _beepOver(){ _playSnd(_sndPo); }
 
 function _remToInterval(rem){
     // |rem|大→間隔長（遠い）、|rem|小→間隔短（近い）
@@ -1757,8 +1759,8 @@ $('voiceBtn').onclick=()=>{
     if(isNaN(v)){ addLog('音声ガイド: 隣の欄に目標Δ（度）を入れてから押してください（例: -0.20）'); return; }
     if(baseline==null){ addLog('音声ガイド: 先にゼロ点を設定してください（Δの基準が必要）'); return; }
     voiceTarget=v; $('voiceBtn').textContent='音声停止';
-    _unlockAudio(); // iOSのユーザー操作起点でサイレントバッファ再生→アンロック
-    setTimeout(()=>_beepOK(), 80); // アンロック直後は少し待つ
+    _unlockAudio(); // iOSのユーザー操作起点で3音とも再生実績を作る（以後setTimeout内でも再生可）
+    setTimeout(()=>_beepOK(), 400); // アンロックのplay/pauseが終わるのを待ってから開始音
     addLog(`🔊 音声ガイド開始: 目標Δ${v>=0?'+':''}${v.toFixed(2)}°（近づく→ピ間隔短縮・±${VOICE_TOL}°でピーーー・行き過ぎはポーン）`);
 };
 $('measureBtn').onclick=()=>startMeasure();
