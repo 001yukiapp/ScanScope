@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.28.0';
+    const _V = 'd0.29.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.28.0</p>
+    <p style="color:#555;">d0.29.0</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -1228,11 +1228,12 @@ function tryAutoConfirm(toe){
         const dEl=$('s-delta'); const prev=dEl.style.color;
         dEl.style.transition='color 0.2s'; dEl.style.color='#34d058';
         setTimeout(()=>{ dEl.style.color=prev||''; dEl.style.transition=''; },800);
-        // 音声ガイド: σ安定の確定値だけ読み上げ（低信頼はスキップ＝誤誘導しない）
+        // ビープガイド: σ安定の確定値で残量を再計算→ビープ間隔を更新（低信頼はスキップ）
         if(voiceTarget!=null&&baseline!=null&&!lowQ){
             const rem=voiceTarget-(mean-baseline);
-            if(Math.abs(rem)<=VOICE_TOL) speak('オーケー。そこで固定');
-            else speak(`あと${rem>0?'プラス':'マイナス'}${Math.abs(rem).toFixed(2)}`);
+            if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
+            if(Math.abs(rem)<=VOICE_TOL){ _beepOK(); }
+            else{ const over=(rem*voiceTarget)<0; _scheduleBeep(rem, over); }
         }
         autoToeHist=[];
     }
@@ -1683,43 +1684,70 @@ $('lockBtn').onclick=()=>{
 };
 $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点を解除しました'); stopVoice('ゼロ点解除のため'); };
 
-// ===== 音声ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
-// σ安定の自動確定ごとに「目標Δまでの残り」を読み上げる。±VOICE_TOLに入ったら「OK固定」。
-// iOS制約: 音声はユーザー操作起点が必須→開始ボタンのクリックで初回発話してアンロック。画面スリープで止まる。
+// ===== ビープ音ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
+// σ安定の自動確定ごとにビープ間隔でΔ残量を伝える。
+// 近づく→間隔短縮(ピ ピ ピ) / ±0.05°以内→長音(ピーーー) / 行き過ぎ→低音(ポーン ポーン)
 const VOICE_TOL=0.05;
 let voiceTarget=null;
-function speak(text, force){
+let _audioCtx=null;
+let _beepTimer=null;
+
+function _getAudioCtx(){
+    if(!_audioCtx) _audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(_audioCtx.state==='suspended') _audioCtx.resume();
+    return _audioCtx;
+}
+function _playTone(freq, dur, type='sine'){
     try{
-        const u=new SpeechSynthesisUtterance(text);
-        u.lang='ja-JP'; u.rate=1.1;
-        if(speechSynthesis.speaking||speechSynthesis.pending){
-            if(!force) return;                             // 読み上げ中の確定は捨てる（4秒後にまた来る）
-            speechSynthesis.cancel();
-            // cancel直後の同期speakはiOSで無音になるquirk → 1拍置く
-            setTimeout(()=>{ try{ speechSynthesis.speak(u); }catch(e){} }, 120);
-            return;
-        }
-        speechSynthesis.speak(u);
+        const ctx=_getAudioCtx();
+        const osc=ctx.createOscillator();
+        const gain=ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type=type; osc.frequency.value=freq;
+        gain.gain.setValueAtTime(0.35, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+dur/1000);
+        osc.start(ctx.currentTime); osc.stop(ctx.currentTime+dur/1000);
     }catch(e){}
 }
+function _beepOK(){ _playTone(880,600); }           // ピーーー（OK）
+function _beepApproach(){ _playTone(1000,70); }     // ピ（近づき）
+function _beepOver(){ _playTone(330,300,'triangle'); } // ポーン（行き過ぎ）
+
+function _remToInterval(rem){
+    // |rem|大→間隔長（遠い）、|rem|小→間隔短（近い）
+    const a=Math.abs(rem);
+    if(a>=2.0) return 2000;
+    if(a<=0.1) return 150;
+    return Math.round(150+(a-0.1)/1.9*1850);
+}
+
+function _scheduleBeep(rem, overshoot){
+    if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
+    if(voiceTarget==null) return;
+    if(overshoot) _beepOver(); else _beepApproach();
+    const iv=_remToInterval(rem);
+    _beepTimer=setTimeout(()=>_scheduleBeep(rem, overshoot), iv);
+}
+
 // ゼロ解除・基準切替で目標Δの意味が消える → ガイドも道連れに止める（孤児化防止）
 function stopVoice(reason){
     if(voiceTarget==null) return;
     voiceTarget=null; $('voiceBtn').textContent='音声ガイド';
+    if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
     addLog(`音声ガイド停止（${reason}）`);
 }
 $('voiceBtn').onclick=()=>{
     if(voiceTarget!=null){
-        voiceTarget=null; $('voiceBtn').textContent='音声ガイド';
-        speak('音声ガイドを停止しました', true); addLog('音声ガイド停止');
+        stopVoice('手動停止');
         return;
     }
     const v=parseFloat($('voiceTargetInput').value);
     if(isNaN(v)){ addLog('音声ガイド: 隣の欄に目標Δ（度）を入れてから押してください（例: -0.20）'); return; }
     if(baseline==null){ addLog('音声ガイド: 先にゼロ点を設定してください（Δの基準が必要）'); return; }
     voiceTarget=v; $('voiceBtn').textContent='音声停止';
-    speak(`音声ガイド開始。目標、${v>0?'プラス':v<0?'マイナス':''}${Math.abs(v).toFixed(2)}度`, true);
-    addLog(`🔊 音声ガイド開始: 目標Δ${v>=0?'+':''}${v.toFixed(2)}°（σ安定の確定ごとに残りを読み上げ・±${VOICE_TOL}°でOK通知・画面スリープで停止します）`);
+    _getAudioCtx(); // iOSのユーザー操作起点でAudioContextをアンロック
+    _beepOK(); // 開始音
+    addLog(`🔊 音声ガイド開始: 目標Δ${v>=0?'+':''}${v.toFixed(2)}°（近づく→ピ間隔短縮・±${VOICE_TOL}°でピーーー・行き過ぎはポーン）`);
 };
 $('measureBtn').onclick=()=>startMeasure();
 $('recordBtn').onclick=()=>{ if(recording) stopRecord(); else startRecord(); };
