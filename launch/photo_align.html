@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.3.2';
+    const _V = 'pa0.4.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -25,6 +25,19 @@
         #result .yaw { font-size:30px; font-weight:700; color:#34d058; }
         #log { background:#000; border-radius:10px; padding:10px; margin-top:10px; font-family:monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; max-height:40vh; overflow-y:auto; }
         .big { color:#34d058; font-weight:700; }
+        #photoResults { margin-top:10px; }
+        #photoResults h3 { font-size:13px; color:#888; margin-bottom:6px; }
+        .photo-grid { display:flex; flex-wrap:wrap; gap:8px; }
+        .photo-card { background:#1c1c1e; border-radius:10px; overflow:hidden; width:calc(50% - 4px); border:2px solid transparent; }
+        .photo-card.adopted { border-color:#34d058; }
+        .photo-card.skipped { border-color:#555; opacity:0.6; }
+        .photo-card.rejected { border-color:#ff453a; opacity:0.75; }
+        .photo-card img { width:100%; height:90px; object-fit:cover; display:block; }
+        .photo-card .info { padding:6px 8px; font-size:11px; line-height:1.6; }
+        .photo-card .status-ok  { color:#34d058; font-weight:700; }
+        .photo-card .status-ng  { color:#ff453a; font-weight:700; }
+        .photo-card .status-skip{ color:#888;    font-weight:700; }
+        .photo-card .detail { color:#aaa; }
     </style>
 </head>
 <body>
@@ -53,6 +66,10 @@
 
     <div id="result"></div>
     <canvas id="canvas"></canvas>
+    <div id="photoResults" style="display:none">
+        <h3>床写真 結果一覧</h3>
+        <div class="photo-grid" id="photoGrid"></div>
+    </div>
     <div id="log"></div>
 
     <script src="./wm_geom.js?v=d0210"></script>
@@ -332,7 +349,36 @@
         let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
         const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
         const fr={}; for(const d of floorDets) fr[d.id]=floorK1T(d);
-        return { fr, n:floorDets.length };
+        return { fr, n:floorDets.length, floorDets };
+    }
+    function captureThumb(floorDets){
+        // 検出タグを枠描きしてからサムネイルを取得
+        const lw=Math.max(3,canvas.width/400);
+        const fs=Math.max(24,canvas.width/80);
+        cctx.lineWidth=lw; cctx.font=`${fs}px sans-serif`;
+        for(const d of floorDets){
+            const c=d.corners;
+            cctx.strokeStyle='#ffd700'; cctx.fillStyle='#ffd700';
+            cctx.beginPath(); cctx.moveTo(c[0].x,c[0].y);
+            for(let i=1;i<4;i++) cctx.lineTo(c[i].x,c[i].y);
+            cctx.closePath(); cctx.stroke();
+            const cx=(c[0].x+c[1].x+c[2].x+c[3].x)/4, cy=(c[0].y+c[1].y+c[2].y+c[3].y)/4;
+            cctx.fillText('ID'+d.id,cx,cy);
+        }
+        return canvas.toDataURL('image/jpeg',0.4);
+    }
+    function addPhotoCard(fname, thumb, adoptedNum, status, detail){
+        const grid=$('photoGrid');
+        const card=document.createElement('div');
+        card.className='photo-card '+status;
+        const img=document.createElement('img'); img.src=thumb; card.appendChild(img);
+        const info=document.createElement('div'); info.className='info';
+        const sClass=status==='adopted'?'status-ok':status==='rejected'?'status-ng':'status-skip';
+        const sText=status==='adopted'?`✅ 採用 #${adoptedNum}`:status==='rejected'?'❌ 却下':'⏭ スキップ';
+        info.innerHTML=`<div class="${sClass}">${sText}</div><div class="detail">${detail}</div>`;
+        card.appendChild(info);
+        grid.prepend(card);  // 新しいものを先頭に
+        $('photoResults').style.display='';
     }
     // frames群から床マップを構築（保存はしない・結果を返すだけ）
     function computeFloorMap(frames){
@@ -370,26 +416,45 @@
     floorFileInput.type='file'; floorFileInput.accept='image/*'; floorFileInput.multiple=true; floorFileInput.style.display='none';
     document.body.appendChild(floorFileInput);
     $('floorBtn').onclick = () => floorFileInput.click();
-    $('floorResetBtn').onclick = () => { floorFrames=[]; lastPlanar=Infinity; lastMedRms=Infinity; log('🗺️ 床マップ蓄積をリセット（次の写真から1枚目として作り直し）'); };
+    $('floorResetBtn').onclick = () => {
+        floorFrames=[]; lastPlanar=Infinity; lastMedRms=Infinity;
+        $('photoGrid').innerHTML=''; $('photoResults').style.display='none';
+        log('🗺️ 床マップ蓄積をリセット（次の写真から1枚目として作り直し）');
+    };
     floorFileInput.onchange = async e => {
         const files=[...e.target.files]; if(!files.length) return;
         log(`🗺️ 床写真${files.length}枚を追加処理（蓄積中: ${floorFrames.length}枚）...`);
         for(const f of files){
+            const fname=f.name;
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
-            const { fr, n } = detectFloorFrame(img);
+            const { fr, n, floorDets } = detectFloorFrame(img);
             URL.revokeObjectURL(img.src);
-            if(Object.keys(fr).length<3){ log(`　床タグ${n}枚（3枚未満→スキップ）`); continue; }
+            const thumb=captureThumb(floorDets);
+            if(Object.keys(fr).length<3){
+                log(`　床タグ${n}枚（3枚未満→スキップ）`);
+                addPhotoCard(fname, thumb, 0, 'skipped', `床タグ${n}枚（3枚以上必要）`);
+                continue;
+            }
             floorFrames.push(fr);
             const res=computeFloorMap(floorFrames);
-            if(!res){ floorFrames.pop(); log(`　床タグ${n}枚（構築失敗→却下）`); continue; }
+            if(!res){
+                floorFrames.pop();
+                log(`　床タグ${n}枚（構築失敗→却下）`);
+                addPhotoCard(fname, thumb, 0, 'rejected', `床タグ${n}枚 | 構築失敗`);
+                continue;
+            }
             // 1〜2枚目は無条件採用（残差は2枚以上で初めて意味を持つ）。
             // 3枚目以降は平面度・残差中央のどちらかが悪化したら却下（悪い観測でマップを汚さない）
             const worse = floorFrames.length>2 && (res.planar>lastPlanar || res.medRms>lastMedRms);
             if(!worse){
                 applyFloorMap(res, floorFrames.length); lastPlanar=res.planar; lastMedRms=res.medRms;
+                addPhotoCard(fname, thumb, floorFrames.length, 'adopted',
+                    `床タグ${n}枚 | 残差${res.medRms.toFixed(1)}mm 平面度${res.planar.toFixed(1)}mm`);
             } else {
                 floorFrames.pop();
                 log(`　床タグ${n}枚 → 悪化につき却下: 平面度${res.planar.toFixed(1)}(前${lastPlanar.toFixed(1)}) 残差${res.medRms.toFixed(1)}(前${lastMedRms.toFixed(1)})`);
+                addPhotoCard(fname, thumb, 0, 'rejected',
+                    `床タグ${n}枚 | 残差${res.medRms.toFixed(1)}mm(前${lastMedRms.toFixed(1)}) 平面度${res.planar.toFixed(1)}mm(前${lastPlanar.toFixed(1)})`);
             }
         }
     };
