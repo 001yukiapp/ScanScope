@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.6.0';
+    const _V = 'pa0.7.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.6.0 Step2 — 床マップ共通で4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー）</div>
+    <div class="ver">pa0.7.0 Step3 — 4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー/スラスト角）</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -182,6 +182,8 @@
         if (P.some(p => !p)) return null;
         const sol = WMGeom.hornPose(P, C);
         const pbar = centroid3(P), cbar = centroid3(C);
+        // カメラのworld位置 = pbar - R^T·cbar（C=R·X+t形式・カメラ原点C=0のworld座標）。Step3の位置算出に使う。
+        const camPosOf = R => vsub(pbar, matVec(matT(R), cbar));
         const Rt = matT(sol.R);
         const camY = pbar[1] - matVec(Rt, cbar)[1];
         if (camY < 0) {
@@ -190,9 +192,9 @@
             const R2 = sol2.R;
             const R_fixed = [[R2[0][0],R2[0][1],-R2[0][2]],[R2[1][0],R2[1][1],-R2[1][2]],[-R2[2][0],-R2[2][1],R2[2][2]]];
             const camY2 = pbar[1] - matVec(matT(R_fixed), cbar)[1];
-            return { R_world_to_cam: R_fixed, camH: camY2, rms: sol2.rms };
+            return { R_world_to_cam: R_fixed, camH: camY2, rms: sol2.rms, camPos: camPosOf(R_fixed) };
         }
-        return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms };
+        return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms, camPos: camPosOf(sol.R) };
     }
 
     function resolveCornerOrderA(Xc, obs, R, t){
@@ -267,9 +269,18 @@
             }
         }
 
-        let R = Rcam, mode = 'camera';
-        if (cameraPose) { R = matMul(matT(cameraPose.R_world_to_cam), Rcam); mode = 'world'; }
-        return { R, mode, residual, faces: valid.length, method, pnpRms };
+        let R = Rcam, mode = 'camera', worldPos = null;
+        if (cameraPose) {
+            R = matMul(matT(cameraPose.R_world_to_cam), Rcam); mode = 'world';
+            // ボス中心のworld位置 = R_w2c^T·cb + camPos（cb=ボスタグのカメラ系重心）。Step3のセンターライン算出に使う。
+            const cb = centroid3(C);
+            worldPos = [
+                matVec(matT(cameraPose.R_world_to_cam), cb)[0] + cameraPose.camPos[0],
+                matVec(matT(cameraPose.R_world_to_cam), cb)[1] + cameraPose.camPos[1],
+                matVec(matT(cameraPose.R_world_to_cam), cb)[2] + cameraPose.camPos[2],
+            ];
+        }
+        return { R, mode, residual, faces: valid.length, method, pnpRms, worldPos };
     }
 
     // ===== detector =====
@@ -378,7 +389,7 @@
             const axM = groupAxisModel(M);
             if(!axM){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): リング軸算出不可（リング3面未満）`); continue; }
             const axW = vnorm(matVec(est.R, axM));   // world系ホイール軸
-            slots[G.slot] = { axW, faces:est.faces, method:est.method, pnpRms:est.pnpRms, residual:est.residual, side, group:G.g };
+            slots[G.slot] = { axW, worldPos:est.worldPos, faces:est.faces, method:est.method, pnpRms:est.pnpRms, residual:est.residual, side, group:G.g };
             okCount++;
             log(`　✅ ${SLOT_LABEL[G.slot]} ← ${G.g} ${est.faces}面 ${est.method}${est.pnpRms!=null?' '+est.pnpRms.toFixed(1)+'px':''} Horn${est.residual.toFixed(1)}mm`);
         }
@@ -402,25 +413,52 @@
             + `<tr style="color:#888;"><th align="left">輪</th><th align="left">world向き</th><th align="left">品質</th></tr>`
             + row('FL')+row('FR')+row('RL')+row('RR') + `</table>`;
 
-        // 集計（向きのみ・位置不要）
+        // ===== 集計 =====
         const have = s => !!slots[s];
         const lines = [];
         if(have('FL') && have('FR')) lines.push(`総トー(前) = <b>${fmtToe(signedAngle(fwd.FL, fwd.FR))}</b>`);
         if(have('RL') && have('RR')) lines.push(`総トー(後) = <b>${fmtToe(signedAngle(fwd.RL, fwd.RR))}</b>`);
+
+        // スラストライン（後輪二等分線）＝向きのみ。個別トーはこれを基準（位置不要）。
+        let thrust = null;
         if(have('RL') && have('RR')){
-            const thrust = vnorm([fwd.RL[0]+fwd.RR[0], fwd.RL[1]+fwd.RR[1], fwd.RL[2]+fwd.RR[2]]);
-            // 個別トー = 各輪 vs スラストライン（後輪二等分線）。スラストライン主役（向きのみで完結）。
+            thrust = vnorm([fwd.RL[0]+fwd.RR[0], fwd.RL[1]+fwd.RR[1], fwd.RL[2]+fwd.RR[2]]);
             const ind = [];
             for(const s of ['FL','FR','RL','RR']) if(have(s)) ind.push(`${SLOT_LABEL[s]} ${fmtToe(signedAngle(thrust, fwd[s]))}`);
             lines.push(`スラストライン基準 個別トー: ${ind.join(' / ')}`);
         }
+
+        // ===== Step3: センターライン・スラスト角（4輪の位置が必要） =====
+        // 水平射影ユーティリティ（UP成分を除去）
+        const horiz = v => { const d=vdot(v,UP); return vnorm([v[0]-d*UP[0], v[1]-d*UP[1], v[2]-d*UP[2]]); };
+        const distH = (a,b) => { const d=vsub(a,b), k=vdot(d,UP); return Math.hypot(d[0]-k*UP[0], d[1]-k*UP[1], d[2]-k*UP[2]); };
+        const all4pos = ['FL','FR','RL','RR'].every(s => have(s) && slots[s].worldPos);
+        let step3 = '';
+        if(all4pos && thrust){
+            const pos = s => slots[s].worldPos;
+            const mid = (a,b) => [(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2];
+            const frontMid = mid(pos('FL'),pos('FR')), rearMid = mid(pos('RL'),pos('RR'));
+            // 幾何学的センターライン = 後軸中点→前軸中点（位置から・水平射影）
+            const centerDir = horiz(vsub(frontMid, rearMid));
+            // スラスト角 = スラストライン vs センターライン（後輪の進行方向がセンターからどれだけ振れるか）
+            const thrustAngle = signedAngle(centerDir, thrust);
+            // 検証用: ホイールベース・前後トレッド（fx/位置スケールの実地チェック）
+            const wb = distH(frontMid, rearMid)*1000, trF = distH(pos('FL'),pos('FR'))*1000, trR = distH(pos('RL'),pos('RR'))*1000;
+            step3 = `スラスト角 = <b>${fmtToe(thrustAngle)}</b>（スラストライン vs センターライン）`
+                + `<br><span style="color:#888;font-size:12px;">参考(位置): ホイールベース${wb.toFixed(0)}mm / 前トレッド${trF.toFixed(0)}mm / 後トレッド${trR.toFixed(0)}mm</span>`;
+        }
+
         if(lines.length){
             html += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid #333;font-size:14px;line-height:1.9;">`
-                + lines.join('<br>') + `</div>`
+                + lines.join('<br>')
+                + (step3 ? `<br>${step3}` : '')
+                + `</div>`
                 + `<div style="color:#666;font-size:11px;margin-top:6px;">`
-                + `※符号(トーイン/アウト)は実車データで要校正。スラスト角はセンターライン(位置)が必要なため未算出。</div>`;
+                + `※符号(トーイン/アウト・スラスト角)は実車データで要校正。`
+                + (all4pos ? `スラスト角は位置使用＝スケール誤差(fx)と位置誤差が効くため参考値。` : `スラスト角は4輪の位置が揃うと算出。`)
+                + `</div>`;
         } else {
-            html += `<div style="color:#888;font-size:12px;margin-top:8px;">同軸2輪が揃うと総トー、後輪2輪が揃うとスラストライン基準の個別トーを表示します。</div>`;
+            html += `<div style="color:#888;font-size:12px;margin-top:8px;">同軸2輪が揃うと総トー、後輪2輪でスラストライン基準の個別トー、4輪揃うとスラスト角を表示します。</div>`;
         }
         $('alignTable').innerHTML = html;
     }
