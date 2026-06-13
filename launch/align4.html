@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.10.1';
+    const _V = 'a0.10.2';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.10.1</p>
+    <p style="color:#555;">a0.10.2</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -97,7 +97,7 @@
         <label style="color:#888;font-size:13px;">床タグ</label>
         <select id="floorSizeSelect">
             <option value="0.089">iPad表示（黒部89mm）</option>
-            <option value="0.19942">紙タイル200mm（黒部実測199.42mm）</option>
+            <option value="0.19942">3Dプリントタイル200mm（黒部実測199.42mm）</option>
         </select>
     </div>
     <button id="startBtn">カメラ起動</button>
@@ -183,7 +183,7 @@ let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 // スケールはタグサイズ(FLOOR_TAG_SIZE)由来。復元後、床平面をy≈0に整列。
 let floorWorld = loadFloorWorld();   // {id:[x,y,z]} | null
 const FLOOR_IDS = [44, 45, 46, 47];
-let FLOOR_TAG_SIZE = 0.089; // 起動画面で選択（iPad89mm / 紙タイル199.42mm）。カメラ起動時に確定
+let FLOOR_TAG_SIZE = 0.089; // 起動画面で選択（iPad89mm / 3Dプリントタイル199.42mm）。カメラ起動時に確定
 const MIN_FLOOR_PX = 40;
 const MIN_WHEEL_PX = 60;
 
