@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache">
+    <title>ScanScope 写真アライメント（Step1）</title>
+    <script>
+    const _V = 'pa0.1.0';
+    if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
+    </script>
+    <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { background:#111; color:#fff; font-family:-apple-system,sans-serif; padding:12px; line-height:1.6; }
+        h1 { font-size:18px; } .ver { color:#555; font-size:12px; margin-bottom:10px; }
+        .panel { background:#1c1c1e; border-radius:12px; padding:12px; margin-bottom:10px; }
+        label { color:#888; font-size:13px; }
+        select, input[type=number] { padding:8px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; font-size:15px; }
+        input[type=number] { width:80px; text-align:center; }
+        button { background:#007aff; color:#fff; border:none; border-radius:11px; padding:12px 18px; font-size:15px; font-weight:600; margin-top:8px; }
+        button.sec { background:rgba(80,80,80,0.9); }
+        #photoInput { display:none; }
+        canvas { width:100%; border-radius:10px; margin-top:8px; background:#000; }
+        #result { font-size:15px; margin-top:10px; }
+        #result .yaw { font-size:30px; font-weight:700; color:#34d058; }
+        #log { background:#000; border-radius:10px; padding:10px; margin-top:10px; font-family:monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; max-height:40vh; overflow-y:auto; }
+        .big { color:#34d058; font-weight:700; }
+    </style>
+</head>
+<body>
+    <h1>ScanScope 写真アライメント</h1>
+    <div class="ver">pa0.1.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+
+    <div class="panel">
+        <div><label>ターゲット</label>
+        <select id="targetSelect">
+            <option value="facetA">ファセットボス前（ID1〜8）</option>
+            <option value="facetB">ファセットボス後（ID9〜16）</option>
+            <option value="diag">ドデカ診断（ID2〜12）</option>
+        </select></div>
+        <div style="margin-top:6px;"><label>写真fx（暫定。12MP=1958）</label>
+        <input id="fxInput" type="number" value="1958" min="500" max="12000" step="1"></div>
+        <div style="margin-top:6px;"><label>床タグ黒部mm</label>
+        <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
+        <div style="margin-top:8px;">
+            <button id="pickBtn">📷 写真を選ぶ</button>
+            <button id="copyLogBtn" class="sec">ログ全コピー</button>
+        </div>
+        <div id="state" style="color:#888;font-size:12px;margin-top:8px;">モデル/床マップ未確認</div>
+    </div>
+
+    <div id="result"></div>
+    <canvas id="canvas"></canvas>
+    <div id="log"></div>
+
+    <script src="./wm_geom.js?v=d0210"></script>
+    <script src="./apriltag_wasm.js"></script>
+    <script>
+    const $ = id => document.getElementById(id);
+    const canvas = $('canvas'), cctx = canvas.getContext('2d', { willReadFrequently:true });
+    let logText = '';
+    function log(s){ logText = s + '\n' + logText; $('log').textContent = logText; }
+    function addLog(s){ log(s); }  // align4関数との互換
+
+    const FLOOR_IDS = [44, 45, 46, 47];
+    const MIN_FLOOR_PX = 40, MIN_WHEEL_PX = 60;
+    let imgW = 0, imgH = 0;        // 直近写真の解像度（camK用）
+    let photoFx = 1958;
+    const camK1 = 0;              // k1=0確定（iOSは歪み補正済み）
+
+    // ===== ターゲット定義（align4と同じ）=====
+    const TARGETS = {
+        diag:   { label:'ドデカ診断',       idMin:2,  idMax:12, modelKey:'scanscope_diag_model',   group:'A' },
+        facetA: { label:'ファセットボス前', idMin:1, idMax:8,  size:55, sizeById:{1:80}, modelKey:'scanscope_dodeca_model', group:'A' },
+        facetB: { label:'ファセットボス後', idMin:9, idMax:16, size:55, sizeById:{9:80}, modelKey:'scanscope_dodeca_model', group:'B' },
+    };
+    let target = TARGETS.facetA;
+    function wheelTagSizeM(id){
+        if (target.size == null) return 0.036;
+        return ((target.sizeById && target.sizeById[id]) || target.size)/1000;
+    }
+
+    // ===== 床マップ・本体モデル（align4のlocalStorageを共有）=====
+    function loadFloorWorld(){
+        try { const s = localStorage.getItem('scanscope_floor_world'); if (s) return JSON.parse(s); } catch(e) {}
+        return null;
+    }
+    let floorWorld = loadFloorWorld();
+    let bodyModel = null, bodyQ = null, bodyQs = null, modelSpanMm = 0;
+    function loadBodyModel(){
+        bodyModel = bodyQ = bodyQs = null; modelSpanMm = 0;
+        try {
+            const s = localStorage.getItem(target.modelKey);
+            if (!s) return;
+            const grp = JSON.parse(s)[target.group];
+            if (grp && grp.P && Object.keys(grp.P).length >= 3) {
+                bodyModel = grp.P; bodyQ = grp.Q||null; bodyQs = grp.Qs||null;
+                const ids = Object.keys(bodyModel);
+                for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++){
+                    const a=bodyModel[ids[i]], b=bodyModel[ids[j]];
+                    const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])*1000;
+                    if (d>modelSpanMm) modelSpanMm=d;
+                }
+            }
+        } catch(e) {}
+    }
+    function refreshState(){
+        loadBodyModel(); floorWorld = loadFloorWorld();
+        const m = bodyModel ? `モデル${Object.keys(bodyModel).length}面${bodyQ?'(PnP可)':'(PnP不可)'}` : '❌モデル無';
+        const f = floorWorld ? `床マップ${Object.keys(floorWorld).length}枚` : '❌床マップ無（align4で床キャリブを）';
+        $('state').textContent = `${target.label} / ${m} / ${f}`;
+    }
+
+    // ===== 行列ユーティリティ（align4と同じ）=====
+    function matT(R){ return [[R[0][0],R[1][0],R[2][0]],[R[0][1],R[1][1],R[2][1]],[R[0][2],R[1][2],R[2][2]]]; }
+    function matMul(A,B){
+        const C=[[0,0,0],[0,0,0],[0,0,0]];
+        for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=A[i][k]*B[k][j];C[i][j]=s;}
+        return C;
+    }
+    function matVec(R,v){ return [R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2], R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2], R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]]; }
+    function centroid3(pts){ const c=[0,0,0]; for(const p of pts){c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];} return [c[0]/pts.length,c[1]/pts.length,c[2]/pts.length]; }
+
+    const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
+    function camK(){ return {fx:photoFx, fy:photoFx, cx:imgW/2, cy:imgH/2, k1:camK1}; }
+    function floorK1T(d){ return d.pose.t; }  // k1=0前提（歪み補正済み）→ホモグラフィのpose.tをそのまま使う
+    function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
+    function extractYaw(R){ return Math.atan2(R[0][2], R[2][2]) * 180 / Math.PI; }
+
+    // ===== カメラ自己位置（床タグ→世界、align4と同じ）=====
+    function localizeCamera(visibleFloor) {
+        if (!floorWorld) return null;
+        if (visibleFloor.length < 3) return null;
+        const P = visibleFloor.map(f => floorWorld[f.id]);
+        const C = visibleFloor.map(f => f.t);
+        if (P.some(p => !p)) return null;
+        const sol = WMGeom.hornPose(P, C);
+        const pbar = centroid3(P), cbar = centroid3(C);
+        const Rt = matT(sol.R);
+        const camY = pbar[1] - matVec(Rt, cbar)[1];
+        if (camY < 0) {
+            const Cmirror = C.map(c => [c[0], c[1], -c[2]]);
+            const sol2 = WMGeom.hornPose(P, Cmirror);
+            const R2 = sol2.R;
+            const R_fixed = [[R2[0][0],R2[0][1],-R2[0][2]],[R2[1][0],R2[1][1],-R2[1][2]],[-R2[2][0],-R2[2][1],R2[2][2]]];
+            const camY2 = pbar[1] - matVec(matT(R_fixed), cbar)[1];
+            return { R_world_to_cam: R_fixed, camH: camY2, rms: sol2.rms };
+        }
+        return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms };
+    }
+
+    function resolveCornerOrderA(Xc, obs, R, t){
+        const K=camK();
+        const pred=Xc.map(x=>{ const Y=WMGeom.matVec3(R,x); const p=WMGeom.projectK(K,[Y[0]+t[0],Y[1]+t[1],Y[2]+t[2]]); return [p.u,p.v]; });
+        let best=null;
+        for(let rev=0;rev<2;rev++){
+            const o=rev?[...obs].reverse():obs;
+            for(let s=0;s<4;s++){
+                let e=0;
+                for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); }
+                if(!best||e<best.e) best={e, arr:[0,1,2,3].map(k=>o[(k+s)%4])};
+            }
+        }
+        let per=0; for(let k=0;k<4;k++){ const a=obs[k], b=obs[(k+1)%4]; per+=Math.hypot(b[0]-a[0],b[1]-a[1]); }
+        const th=Math.max(40, (per/4)*0.4);
+        return best.e/4<th ? best.arr : null;
+    }
+
+    // ===== ホイール姿勢推定（Horn初期化→コーナーPnP、align4と同じ）=====
+    function estimateWheelPose(wheelDets, cameraPose) {
+        if (!bodyModel) return { err:'モデル未読込' };
+        const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
+        if (valid.length < 4) return { err:`${valid.length}面<4（絶対測定は4面以上必須）` };
+        const P = valid.map(d => bodyModel[String(d.id)]);
+        const C = valid.map(d => d.pose.t);
+        const sol = WMGeom.hornPose(P, C);
+        const residual = sol.rms * 1000;
+        const hornGate = Math.max(8, modelSpanMm * 0.10);
+        if (residual > hornGate) return { err:`Horn残差${residual.toFixed(1)}mm>ゲート${hornGate.toFixed(0)}` };
+        let Rcam = sol.R, method = '中心', pnpRms = null;
+
+        if (bodyQ) {
+            const pb = centroid3(P), cb = centroid3(C);
+            const Rp = WMGeom.matVec3(Rcam, pb);
+            const t0 = [cb[0]-Rp[0], cb[1]-Rp[1], cb[2]-Rp[2]];
+            const tags = [];
+            for (const d of valid) {
+                const id = String(d.id), q = bodyQ[id];
+                if (!q) continue;
+                if (bodyQs && bodyQs[id]!=null && bodyQs[id]<0.25) continue;
+                const p0 = bodyModel[id];
+                const hh = wheelTagSizeM(d.id)/2;
+                const Xc = TAG_LOCAL(hh).map(l=>{ const v=WMGeom.matVec3(q,l); return [p0[0]+v[0],p0[1]+v[1],p0[2]+v[2]]; });
+                const ord = resolveCornerOrderA(Xc, d.corners.map(c=>[c.x,c.y]), Rcam, t0);
+                if (!ord) continue;
+                tags.push({id:d.id, Xc, uv:ord});
+            }
+            const K = camK();
+            const run = arr => {
+                const X=[],uv=[];
+                for(const tg of arr) for(let k=0;k<4;k++){ X.push(tg.Xc[k]); uv.push(tg.uv[k]); }
+                return X.length>=8 ? WMGeom.pnpRefine(X,uv,K,Rcam,t0,10) : null;
+            };
+            let ref = run(tags), used = tags.length;
+            if (ref) {
+                const perTag = tags.map(tg=>{
+                    let s=0;
+                    for(let k=0;k<4;k++){ const Y=WMGeom.matVec3(ref.R,tg.Xc[k]); const p=WMGeom.projectK(K,[Y[0]+ref.t[0],Y[1]+ref.t[1],Y[2]+ref.t[2]]); s+=(p.u-tg.uv[k][0])**2+(p.v-tg.uv[k][1])**2; }
+                    return Math.sqrt(s/4);
+                });
+                const med=[...perTag].sort((a,b)=>a-b)[Math.floor(perTag.length/2)];
+                const keep=tags.filter((_,i)=>perTag[i]<=Math.max(2.5*med,4));
+                if(keep.length<tags.length && keep.length>=2){ const r2=run(keep); if(r2 && r2.rmsPx<ref.rmsPx){ ref=r2; used=keep.length; } }
+                const psG=valid.map(d=>tagPx(d)).sort((x,y)=>x-y);
+                const gatePx=Math.min(45, Math.max(20, 25*psG[Math.floor(psG.length/2)]/100));
+                if(ref.rmsPx<gatePx){ Rcam=ref.R; pnpRms=ref.rmsPx; method=`PnP${used}`; }
+                else return { err:`PnP棄却 ${ref.rmsPx.toFixed(0)}px>ゲート${gatePx.toFixed(0)}` , faces:valid.length, residual };
+            }
+        }
+
+        let R = Rcam, mode = 'camera';
+        if (cameraPose) { R = matMul(matT(cameraPose.R_world_to_cam), Rcam); mode = 'world'; }
+        return { R, mode, residual, faces: valid.length, method, pnpRms };
+    }
+
+    // ===== detector =====
+    let detector = null;
+    async function initDetector(){
+        const Module = await AprilTagWasm();
+        const _init=Module.cwrap('atagjs_init','number',[]);
+        const _setOpt=Module.cwrap('atagjs_set_detector_options','number',['number','number','number','number','number','number','number']);
+        const _setPose=Module.cwrap('atagjs_set_pose_info','number',['number','number','number','number']);
+        const _setBuf=Module.cwrap('atagjs_set_img_buffer','number',['number','number','number']);
+        const _setSize=Module.cwrap('atagjs_set_tag_size',null,['number','number']);
+        const _detect=Module.cwrap('atagjs_detect','number',[]);
+        _init(); _setOpt(1.0,0.0,1,1,0,1,1);
+        detector = {
+            set_camera_info:(fx,fy,cx,cy)=>_setPose(fx,fy,cx,cy),
+            set_tag_size:(id,sz)=>_setSize(id,sz),
+            detect:(g,w,h)=>{
+                const buf=_setBuf(w,h,w); Module.HEAPU8.set(g,buf);
+                const ptr=_detect(); const len=Module.getValue(ptr,'i32');
+                if(len===0) return [];
+                const sp=Module.getValue(ptr+4,'i32');
+                const view=new Uint8Array(Module.HEAP8.buffer, sp, len);
+                let j=''; for(let i=0;i<len;i++) j+=String.fromCharCode(view[i]);
+                return JSON.parse(j);
+            }
+        };
+        log('✅ AprilTag WASM 初期化OK');
+        refreshState();
+    }
+    initDetector().catch(e=>log('❌ 初期化失敗: '+e.message));
+
+    // ===== 写真処理（process相当・videoの代わりに静止画）=====
+    function processPhoto(img){
+        if(!detector){ log('❌ detector未初期化'); return; }
+        imgW = img.naturalWidth; imgH = img.naturalHeight;
+        canvas.width = imgW; canvas.height = imgH;
+        cctx.drawImage(img, 0, 0, imgW, imgH);
+
+        photoFx = parseFloat($('fxInput').value) || 1958;
+        const floorSz = (parseFloat($('floorSizeInput').value)||199.42)/1000;
+        detector.set_camera_info(photoFx, photoFx, imgW/2, imgH/2);
+        for (let id=target.idMin; id<=target.idMax; id++) detector.set_tag_size(id, wheelTagSizeM(id));
+        for (const id of FLOOR_IDS) detector.set_tag_size(id, floorSz);
+
+        const idata = cctx.getImageData(0,0,imgW,imgH);
+        const gray = new Uint8Array(imgW*imgH);
+        for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
+        let dets=[]; try{ dets=detector.detect(gray,imgW,imgH)||[]; }catch(e){ log('❌ detect例外: '+e.message); return; }
+
+        const floorDets = dets.filter(d => d.pose && FLOOR_IDS.includes(d.id) && tagPx(d)>=MIN_FLOOR_PX);
+        const wheelDets = dets.filter(d => d.pose && d.id>=target.idMin && d.id<=target.idMax && tagPx(d)>=MIN_WHEEL_PX);
+
+        // 描画
+        cctx.lineWidth=Math.max(2,imgW/500); cctx.font=`${Math.max(16,imgW/80)}px sans-serif`;
+        const drawDet=(d,col)=>{ const c=d.corners; cctx.strokeStyle=col; cctx.fillStyle=col;
+            cctx.beginPath(); cctx.moveTo(c[0].x,c[0].y); for(let i=1;i<4;i++)cctx.lineTo(c[i].x,c[i].y); cctx.closePath(); cctx.stroke();
+            const cx=(c[0].x+c[1].x+c[2].x+c[3].x)/4, cy=(c[0].y+c[1].y+c[2].y+c[3].y)/4; cctx.fillText('ID'+d.id,cx,cy); };
+        floorDets.forEach(d=>drawDet(d,'#ffd700')); wheelDets.forEach(d=>drawDet(d,'#00ff00'));
+
+        // カメラ自己位置
+        let cameraPose=null;
+        if(floorDets.length>=3){
+            const visible=floorDets.map(d=>({id:d.id, t:floorK1T(d)}));
+            cameraPose=localizeCamera(visible);
+        }
+        // ホイール姿勢
+        const est=estimateWheelPose(wheelDets, cameraPose);
+
+        // 結果
+        log('────────────');
+        log(`解像度${imgW}×${imgH} fx${photoFx} | 床タグ${floorDets.length}枚 ボスタグ${wheelDets.length}枚`);
+        if(cameraPose) log(`カメラ自己位置: 床PnP rms${(cameraPose.rms*1000).toFixed(1)}mm 高さ${(cameraPose.camH*100).toFixed(0)}cm`);
+        else log(`⚠ カメラ自己位置なし（床タグ3枚以上必要・現在${floorDets.length}枚）→ world yaw不可`);
+
+        if(est && est.R){
+            const yaw=extractYaw(est.R);
+            const wn = est.mode==='world' ? 'world（絶対）' : 'camera（カメラ基準・絶対でない）';
+            $('result').innerHTML = `<div>world yaw <span class="yaw">${yaw>=0?'+':''}${yaw.toFixed(2)}°</span></div>`
+                + `<div style="font-size:12px;color:#888;">${wn} / ${est.faces}面 ${est.method} ${est.pnpRms!=null?est.pnpRms.toFixed(1)+'px':''} Horn残差${est.residual.toFixed(1)}mm</div>`;
+            log(`<RESULT> yaw ${yaw.toFixed(2)}° (${est.mode}) ${est.faces}面 ${est.method}${est.pnpRms!=null?' '+est.pnpRms.toFixed(1)+'px':''} Horn${est.residual.toFixed(1)}mm`);
+            if(est.mode!=='world') log('⚠ world座標になっていません（床タグ3枚以上＋床マップ必須）。yawはカメラ基準で絶対比較に使えません');
+        } else {
+            $('result').innerHTML = `<div style="color:#ff6b6b;">ボス姿勢が出ません: ${est?est.err:'不明'}</div>`;
+            log(`❌ ボス姿勢NG: ${est?est.err:'不明'}`);
+        }
+    }
+
+    // ===== UI =====
+    $('targetSelect').onchange = () => { target = TARGETS[$('targetSelect').value]||TARGETS.facetA; refreshState(); };
+    $('pickBtn').onclick = () => $('photoInput').click();
+    $('copyLogBtn').onclick = () => {
+        const ordered = logText.split('\n').reverse().join('\n');
+        navigator.clipboard.writeText(ordered).then(()=>{ $('copyLogBtn').textContent='コピー済み✓'; setTimeout(()=>$('copyLogBtn').textContent='ログ全コピー',2000); }).catch(()=>log('❌コピー失敗'));
+    };
+    const photoInput = document.createElement('input');
+    photoInput.type='file'; photoInput.accept='image/*'; photoInput.id='photoInput'; photoInput.style.display='none';
+    document.body.appendChild(photoInput);
+    photoInput.onchange = e => {
+        const f=e.target.files[0]; if(!f) return;
+        const img=new Image();
+        img.onload=()=>{ processPhoto(img); URL.revokeObjectURL(img.src); };
+        img.onerror=()=>log('❌ 画像読み込み失敗');
+        img.src=URL.createObjectURL(f);
+    };
+    </script>
+</body>
+</html>
