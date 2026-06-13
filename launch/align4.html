@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.10.2';
+    const _V = 'a0.10.3';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.10.2</p>
+    <p style="color:#555;">a0.10.3</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -153,6 +153,7 @@
         <button onclick="showResults()" class="sec">結果を見る</button>
         <button onclick="clearFloor()" class="sec">床消去</button>
         <button onclick="clearAll()" class="sec">全消去</button>
+        <button onclick="resetK1()" class="sec">k1リセット</button>
     </div>
 
     <div id="log-panel"></div>
@@ -392,6 +393,12 @@ const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
 // レンズ歪みk1（dodeca.htmlの「精錬」で推定された値を共有・localStorage）
 let camK1=parseFloat(localStorage.getItem('scanscope_k1'))||0;
 function camK(){ return {fx:1243, fy:1243, cx:overlay.width/2, cy:overlay.height/2, k1:camK1}; }
+// k1を0にリセット（真k1≈0。屋外精錬で漂流した偽解0.0414を破棄して視点バイアスを切り分ける）
+function resetK1(){
+    camK1=0;
+    localStorage.setItem('scanscope_k1','0');
+    addLog('✅ k1を0にリセットしました（偽解0.0414を破棄）。床マップはk1が変わったので「床消去」→「床キャリブ」をやり直してください');
+}
 // PnP不発・棄却の理由を全タグ分ログ（5秒に1回・dodecaのPnP診断と同形式）
 function a4DiagLog(diag, tail){
     const now=performance.now();
