@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.29.3';
+    const _V = 'd0.30.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.29.3</p>
+    <p style="color:#555;">d0.30.0</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -1751,10 +1751,10 @@ function _beepLoop(){
     let next=600; // ターゲットなし＝無音で待機
     if(_beepRem!=null){
         const rem=_beepRem;
-        if(Math.abs(rem)<=VOICE_TOL){ _beepOK(); next=1500; } // 到達: ピーーーを1.5秒ごと
+        if(Math.abs(rem)<=VOICE_TOL*1.5){ _beepOK(); next=620; } // 到達: ピーーーほぼ連続（±0.075°ヒステリシス）
         else{
-            // 行き過ぎ＝目標と反対側へ超えた（目標-0.2へ向かい-0.3まで行くとrem=+0.1で符号が反転）
-            const over=(rem*voiceTarget)<0&&Math.abs(voiceTarget)>VOICE_TOL;
+            // 行き過ぎ＝目標と反対側へ超えた（|rem|>VOICE_TOL*2にして近辺ノイズでポーンが混ざらないように）
+            const over=(rem*voiceTarget)<0&&Math.abs(rem)>VOICE_TOL*2&&Math.abs(voiceTarget)>VOICE_TOL;
             if(over) _beepOver(); else _beepApproach();
             next=_remToInterval(rem);
         }
