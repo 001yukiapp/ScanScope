@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.32.0';
+    const _V = 'd0.32.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.32.0</p>
+    <p style="color:#555;">d0.32.1</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -1887,11 +1887,12 @@ function _beepReverse(){
     }
 }
 
-// 目標方向の距離(°)→パルス間隔(ms)。2°以上=1000ms、近いほど無段階で速く、最短150ms（残り0でターゲット連続へ）
+// 目標方向の距離(°)→パルス間隔(ms)。3°以上=1500ms（それ以上は目視で分かるので頭打ち）、
+// 3°〜0は無段階で速く、最短150ms（残り0でターゲット連続へ）。3°以内で間隔が動く＝近寄り方向が分かる
 function _intervalFromDist(dist){
     const d=Math.abs(dist);
-    if(d>=2.0) return 1000;
-    return Math.round(Math.max(150, d/2.0*1000));
+    if(d>=3.0) return 1500;
+    return Math.round(Math.max(150, d/3.0*1500));
 }
 
 // 毎フレームの生Δで残量を更新（σ安定を待たない＝回している最中もリズムが追従する）
