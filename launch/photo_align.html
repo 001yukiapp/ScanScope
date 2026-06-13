@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.2.0';
+    const _V = 'pa0.3.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -29,7 +29,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.2.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+    <div class="ver">pa0.3.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
 
     <div class="panel">
         <div><label>ターゲット</label>
@@ -44,6 +44,7 @@
         <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
         <div style="margin-top:8px;">
             <button id="floorBtn" class="sec">🗺️ 床マップを写真で作成</button>
+            <button id="floorResetBtn" class="sec">床リセット</button>
             <button id="pickBtn">📷 測定写真を選ぶ</button>
             <button id="copyLogBtn" class="sec">ログ全コピー</button>
         </div>
@@ -66,6 +67,8 @@
     const FLOOR_IDS = [44, 45, 46, 47];
     const MIN_FLOOR_PX = 40, MIN_WHEEL_PX = 60;
     let imgW = 0, imgH = 0;        // 直近写真の解像度（camK用）
+    let floorFrames = [];          // 床マップ用に蓄積したフレーム（写真ごと1フレーム）
+    let lastPlanar = Infinity;     // 直近採用時の平面度（悪化フレーム却下の基準）
     let photoFx = 1958;
     const camK1 = 0;              // k1=0確定（iOSは歪み補正済み）
 
@@ -330,31 +333,32 @@
         const fr={}; for(const d of floorDets) fr[d.id]=floorK1T(d);
         return { fr, n:floorDets.length };
     }
-    function buildFloorMap(frames){
-        if(!frames.length){ log('❌ 床タグが写った写真がありません'); return; }
+    // frames群から床マップを構築（保存はしない・結果を返すだけ）
+    function computeFloorMap(frames){
         const idset=new Set(); frames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
         const { pos, placed, failed } = WMGeom.buildBody([...idset], frames);
-        if(placed.length<3){ log(`❌ 床マップ失敗: 復元${placed.length}枚のみ。床タグ4枚が同時に写った写真を使ってください`); return; }
+        if(placed.length<3) return null;
         const ids=placed.map(Number).sort((a,b)=>a-b);
-        const o=pos[ids[0]];
-        const ex=vnorm(vsub(pos[ids[1]],o));
+        const o=pos[ids[0]]; const ex=vnorm(vsub(pos[ids[1]],o));
         let n=null;
         for(let k=2;k<ids.length;k++){ const c=vcross(ex,vsub(pos[ids[k]],o)); if(Math.hypot(c[0],c[1],c[2])>1e-6){ n=vnorm(c); break; } }
-        if(!n){ log('❌ 床マップ失敗: タグがほぼ一直線。2×2に並べ直してください'); return; }
+        if(!n) return null;
         const ey=n, ez=vcross(ex,ey);
         const world={}; let maxOff=0;
         for(const id of ids){ const d=vsub(pos[id],o); const p=[vdot(d,ex),vdot(d,ey),vdot(d,ez)]; maxOff=Math.max(maxOff,Math.abs(p[1])); world[id]=p; }
         const rmss=[];
         for(const fr of frames){ const fids=Object.keys(fr).filter(id=>world[id]); if(fids.length<3)continue; rmss.push(WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).rms*1000); }
         rmss.sort((a,b)=>a-b);
-        const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
-        floorWorld=world;
-        localStorage.setItem('scanscope_floor_world', JSON.stringify(world));
+        return { world, ids, planar:maxOff*1000, medRms:(rmss.length?rmss[Math.floor(rmss.length/2)]:0), failed };
+    }
+    function applyFloorMap(res, nFrames){
+        floorWorld=res.world;
+        localStorage.setItem('scanscope_floor_world', JSON.stringify(res.world));
         const floorSz=(parseFloat($('floorSizeInput').value)||199.42)/1000;
-        localStorage.setItem('scanscope_floor_meta', JSON.stringify({ rms:+medRms.toFixed(1), planar:+(maxOff*1000).toFixed(1), k1:0, size:floorSz, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) }));
+        localStorage.setItem('scanscope_floor_meta', JSON.stringify({ rms:+res.medRms.toFixed(1), planar:+res.planar.toFixed(1), k1:0, size:floorSz, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) }));
         const dists=[];
-        for(let i=0;i<ids.length;i++)for(let j=i+1;j<ids.length;j++){ const dv=vsub(world[ids[j]],world[ids[i]]); dists.push(`${ids[i]}-${ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`); }
-        log(`✅ 床マップ作成: ${ids.length}枚 残差中央${medRms.toFixed(1)}mm 平面度${(maxOff*1000).toFixed(1)}mm（写真${frames.length}枚${failed.length?` 欠${failed.length}`:''}）`);
+        for(let i=0;i<res.ids.length;i++)for(let j=i+1;j<res.ids.length;j++){ const dv=vsub(res.world[res.ids[j]],res.world[res.ids[i]]); dists.push(`${res.ids[i]}-${res.ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`); }
+        log(`✅ 床マップ更新: ${res.ids.length}枚 残差中央${res.medRms.toFixed(1)}mm 平面度${res.planar.toFixed(1)}mm（採用写真${nFrames}枚）`);
         log(`　中心間距離: ${dists.join(' ')}`);
         refreshState();
     }
@@ -365,18 +369,26 @@
     floorFileInput.type='file'; floorFileInput.accept='image/*'; floorFileInput.multiple=true; floorFileInput.style.display='none';
     document.body.appendChild(floorFileInput);
     $('floorBtn').onclick = () => floorFileInput.click();
+    $('floorResetBtn').onclick = () => { floorFrames=[]; lastPlanar=Infinity; log('🗺️ 床マップ蓄積をリセット（次の写真から1枚目として作り直し）'); };
     floorFileInput.onchange = async e => {
         const files=[...e.target.files]; if(!files.length) return;
-        log(`🗺️ 床マップ用に${files.length}枚を処理中...`);
-        const frames=[];
+        log(`🗺️ 床写真${files.length}枚を追加処理（蓄積中: ${floorFrames.length}枚）...`);
         for(const f of files){
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
             const { fr, n } = detectFloorFrame(img);
             URL.revokeObjectURL(img.src);
-            log(`　写真: 床タグ${n}枚検出`);
-            if(Object.keys(fr).length>=2) frames.push(fr);
+            if(Object.keys(fr).length<3){ log(`　床タグ${n}枚（3枚未満→スキップ）`); continue; }
+            floorFrames.push(fr);
+            const res=computeFloorMap(floorFrames);
+            if(!res){ floorFrames.pop(); log(`　床タグ${n}枚（構築失敗→却下）`); continue; }
+            // 1枚目は無条件採用。2枚目以降は平面度が改善（+1mmマージン内）なら採用、悪化なら却下
+            if(floorFrames.length===1 || res.planar<=lastPlanar+1.0){
+                applyFloorMap(res, floorFrames.length); lastPlanar=res.planar;
+            } else {
+                floorFrames.pop();
+                log(`　床タグ${n}枚 → 平面度悪化 ${res.planar.toFixed(1)}>${lastPlanar.toFixed(1)}mm につき却下（不採用）`);
+            }
         }
-        buildFloorMap(frames);
     };
     $('pickBtn').onclick = () => $('photoInput').click();
     $('copyLogBtn').onclick = () => {
