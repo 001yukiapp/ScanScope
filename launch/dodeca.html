@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.29.2';
+    const _V = 'd0.29.3';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.29.2</p>
+    <p style="color:#555;">d0.29.3</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -184,6 +184,8 @@ let calibrating = false;
 let baseline = loadBaseline();       // number | null
 function loadBaseline(){ const s=localStorage.getItem('scanscope_dodeca_baseline'); return s!=null?parseFloat(s):null; }
 function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_dodeca_baseline'); else localStorage.setItem('scanscope_dodeca_baseline',String(baseline)); }
+// 角度差を[-180,180]に正規化（絶対トーが±180°境界をまたぐとΔが±360°飛ぶ事故対策）
+function wrap180(a){ return ((a+180)%360+360)%360-180; }
 
 function emptyModel(){ return Object.fromEntries(GROUPS.map(g=>[g.key,{P:{}}])); }
 function loadModel() {
@@ -1205,6 +1207,8 @@ const AUTO_WIN=25, AUTO_SD_TH=0.25;          // 25フレームのσが0.25°以�
 let autoToeHist=[], autoLockout=0;
 
 function tryAutoConfirm(toe){
+    // ±180°境界またぎ対策: 直前値に連続するようアンラップしてから蓄積（σが偽の爆発をしない）
+    if(autoToeHist.length){ const p=autoToeHist[autoToeHist.length-1]; toe=p+wrap180(toe-p); }
     autoToeHist.push(toe); if(autoToeHist.length>AUTO_WIN) autoToeHist.shift();
     if(autoToeHist.length<AUTO_WIN) return;
     const now=performance.now(); if(now<autoLockout) return;
@@ -1213,7 +1217,8 @@ function tryAutoConfirm(toe){
     $('s-toe-sd').textContent=`σ${sd.toFixed(2)}°`;
     if(sd<AUTO_SD_TH){
         autoLockout=now+4000;                              // 4秒ロックアウト（連続確定防止）
-        const dStr=baseline!=null?` Δ${(mean-baseline>=0?'+':'')}${(mean-baseline).toFixed(2)}°`:'';
+        const dW=baseline!=null?wrap180(mean-baseline):null;
+        const dStr=dW!=null?` Δ${(dW>=0?'+':'')}${dW.toFixed(2)}°`:'';
         // 表示系の自動ログ: 基準とキャンバーも刻印（パネルを見ていなくてもログだけで判断できるように）
         const d=_lastEstForRecord||{};
         const bs=d.basis?`・${d.basis}基準`:'';
@@ -1224,17 +1229,10 @@ function tryAutoConfirm(toe){
         // 面数<6ルールはH1（単体）由来。dual（ベンチ2台）は4〜5面でも±0.04°実績があるのでσのみで判定
         const lowQ=(d.mode==='single'&&(d.faces<6||!pnpOK))||sd>0.05;
         const fStr=faces!=null?`・${faces}面${pnpOK?'':'中心'}`:'';
-        addLog(`★自動確定 トー${mean.toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定${bs}${fStr}${cb}）${lowQ?' ⚠低信頼→採用しない（6面未満/中心法/σ>0.05）':''}`);
+        addLog(`★自動確定 トー${wrap180(mean).toFixed(2)}°±${sd.toFixed(2)}°${dStr}（${AUTO_WIN}フレーム安定${bs}${fStr}${cb}）${lowQ?' ⚠低信頼→採用しない（6面未満/中心法/σ>0.05）':''}`);
         const dEl=$('s-delta'); const prev=dEl.style.color;
         dEl.style.transition='color 0.2s'; dEl.style.color='#34d058';
         setTimeout(()=>{ dEl.style.color=prev||''; dEl.style.transition=''; },800);
-        // ビープガイド: σ安定の確定値で残量を再計算→ビープ間隔を更新（低信頼はスキップ）
-        if(voiceTarget!=null&&baseline!=null&&!lowQ){
-            const rem=voiceTarget-(mean-baseline);
-            if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
-            if(Math.abs(rem)<=VOICE_TOL){ _beepOK(); }
-            else{ const over=(rem*voiceTarget)<0; _scheduleBeep(rem, over); }
-        }
         autoToeHist=[];
     }
 }
@@ -1347,7 +1345,8 @@ function doMeasure(groups){
                 `トー計算: 単体${g}・重力基準（固定カメラの向きが基準。カメラ/三脚を動かすと値が変わるので注意）`);
             else autoToeHist=[];                           // 単体診断（トーなし）→自動確定バッファリセット
             $('graph-wrap').style.display=gt1?'block':'none';
-            const delta=(gt1&&baseline!=null)?gt1.toe-baseline:null;
+            const delta=(gt1&&baseline!=null)?wrap180(gt1.toe-baseline):null;
+            _updateBeepRem(delta);
             _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms,pnpFail:est.pnpFail,dist:g==='A'?dA:dB,
                 toe:gt1?gt1.toe:null, delta, camA:gt1?gt1.camberB:null, basis:gt1?`単体${g}重力`:null};
             if(viewDiff!=null){
@@ -1381,6 +1380,7 @@ function doMeasure(groups){
             if(gt1){ pushHist(gt1.toe); tryAutoConfirm(gt1.toe); }
         }else{
             autoToeHist=[];                                // ターゲット消失（付け外し中）→σ窓の跨ぎ混入防止
+            _updateBeepRem(null);                          // ビープも黙る（古い残量で鳴り続けない）
             // 消失が続いたらトー履歴も捨てる: 付け直し後のゼロ点設定が付け外し前の値を中央値に混ぜないように
             if(noTargetFrames.A>=HIST_CLEAR_DELAY&&noTargetFrames.B>=HIST_CLEAR_DELAY&&hist.length) hist.length=0;
             $('graph-wrap').style.display=(_toeBasis&&_toeBasis.startsWith('単体'))?'block':'none';
@@ -1402,7 +1402,8 @@ function doMeasure(groups){
     applyToeBasis(basis, basis==='重力'
         ? 'トー計算: 重力基準（IMU OK・ボスのスピンに不変）'
         : '⚠ トー計算: 本体基準（IMU重力なし・ボスのスピンで誤差が出る）');
-    const delta=baseline!=null?toe-baseline:null;
+    const delta=baseline!=null?wrap180(toe-baseline):null;
+    _updateBeepRem(delta);
     $('graph-wrap').style.display='block';
     {
         const aOK=a.method&&a.method.startsWith('PnP'), bOK=b.method&&b.method.startsWith('PnP');
@@ -1532,7 +1533,7 @@ function finishMeasure(){
     const n=kept.length, mean=kept.reduce((s,v)=>s+v,0)/n;
     const sd=Math.sqrt(kept.reduce((s,v)=>s+(v-mean)**2,0)/n);
     const se=sd/Math.sqrt(n);
-    const dStr = baseline!=null ? ` ｜ Δ${(mean-baseline>=0?'+':'')}${(mean-baseline).toFixed(2)}°` : '';
+    const dStr = baseline!=null ? ` ｜ Δ${(wrap180(mean-baseline)>=0?'+':'')}${wrap180(mean-baseline).toFixed(2)}°` : '';
     addLog(`★トー ${mean.toFixed(2)}° ±${se.toFixed(3)}°${dStr}（σ${sd.toFixed(2)} 採用${n}/${nRaw}）`);
     return { mean, se };
 }
@@ -1718,10 +1719,12 @@ const _sndPo=new Audio(_makeToneWav(330,350,'triangle')); // ポーン（行き�
 for(const a of [_sndOK,_sndPi,_sndPo]){ a.preload='auto'; a.setAttribute('playsinline',''); }
 function _playSnd(a){ try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){} }
 function _unlockAudio(){
-    // user gesture内で3種とも一度play→即pause（iOSのaudio要素は操作起点の再生実績が必要）
-    for(const a of [_sndOK,_sndPi,_sndPo]){
-        try{ a.muted=true; a.play().then(()=>{ a.pause(); a.currentTime=0; a.muted=false; }).catch(()=>{ a.muted=false; }); }catch(e){}
+    // user gesture内でピ・ポーンに再生実績を作る（iOSのaudio要素は操作起点の再生が必要。
+    // muted再生はアンロックにならないため音量そのままでplay→即pause＝ほぼ無音の一瞬）
+    for(const a of [_sndPi,_sndPo]){
+        try{ a.play().then(()=>{ a.pause(); a.currentTime=0; }).catch(()=>{}); }catch(e){}
     }
+    // OK音はこの直後に開始音として普通に鳴らす＝それ自体がアンロック
 }
 function _beepOK(){ _playSnd(_sndOK); }
 function _beepApproach(){ _playSnd(_sndPi); }
@@ -1735,18 +1738,34 @@ function _remToInterval(rem){
     return Math.round(150+(a-0.1)/1.9*1850);
 }
 
-function _scheduleBeep(rem, overshoot){
-    if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
+// 毎フレームの生Δで残量を更新（σ安定を待たない＝回している最中もリズムが追従する）
+let _beepRem=null;
+function _updateBeepRem(delta){
+    if(voiceTarget==null||delta==null){ _beepRem=null; return; }
+    _beepRem=voiceTarget-delta;
+}
+// 自走ループ: 鳴らす瞬間に最新の残量を読む
+function _beepLoop(){
+    _beepTimer=null;
     if(voiceTarget==null) return;
-    if(overshoot) _beepOver(); else _beepApproach();
-    const iv=_remToInterval(rem);
-    _beepTimer=setTimeout(()=>_scheduleBeep(rem, overshoot), iv);
+    let next=600; // ターゲットなし＝無音で待機
+    if(_beepRem!=null){
+        const rem=_beepRem;
+        if(Math.abs(rem)<=VOICE_TOL){ _beepOK(); next=1500; } // 到達: ピーーーを1.5秒ごと
+        else{
+            // 行き過ぎ＝目標と反対側へ超えた（目標-0.2へ向かい-0.3まで行くとrem=+0.1で符号が反転）
+            const over=(rem*voiceTarget)<0&&Math.abs(voiceTarget)>VOICE_TOL;
+            if(over) _beepOver(); else _beepApproach();
+            next=_remToInterval(rem);
+        }
+    }
+    _beepTimer=setTimeout(_beepLoop, next);
 }
 
 // ゼロ解除・基準切替で目標Δの意味が消える → ガイドも道連れに止める（孤児化防止）
 function stopVoice(reason){
     if(voiceTarget==null) return;
-    voiceTarget=null; $('voiceBtn').textContent='音声ガイド';
+    voiceTarget=null; _beepRem=null; $('voiceBtn').textContent='音声ガイド';
     if(_beepTimer){ clearTimeout(_beepTimer); _beepTimer=null; }
     addLog(`音声ガイド停止（${reason}）`);
 }
@@ -1759,8 +1778,10 @@ $('voiceBtn').onclick=()=>{
     if(isNaN(v)){ addLog('音声ガイド: 隣の欄に目標Δ（度）を入れてから押してください（例: -0.20）'); return; }
     if(baseline==null){ addLog('音声ガイド: 先にゼロ点を設定してください（Δの基準が必要）'); return; }
     voiceTarget=v; $('voiceBtn').textContent='音声停止';
-    _unlockAudio(); // iOSのユーザー操作起点で3音とも再生実績を作る（以後setTimeout内でも再生可）
-    setTimeout(()=>_beepOK(), 400); // アンロックのplay/pauseが終わるのを待ってから開始音
+    _unlockAudio();        // ピ・ポーンの再生実績をuser gesture内で作る
+    _beepOK();             // 開始音（gesture内の通常再生＝これ自体がOK音のアンロック）
+    _beepRem=null;
+    setTimeout(_beepLoop, 1200); // 開始音が鳴り終わってからループ開始
     addLog(`🔊 音声ガイド開始: 目標Δ${v>=0?'+':''}${v.toFixed(2)}°（近づく→ピ間隔短縮・±${VOICE_TOL}°でピーーー・行き過ぎはポーン）`);
 };
 $('measureBtn').onclick=()=>startMeasure();
