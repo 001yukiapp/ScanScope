@@ -7,7 +7,7 @@
     <title>ScanScope 写真PoC</title>
     <script>
     // バージョン付きURLでキャッシュ無効化
-    const _V = 'p0.1.0';
+    const _V = 'p0.1.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -27,7 +27,7 @@
 </head>
 <body>
     <h1>ScanScope 写真PoC</h1>
-    <div class="ver">p0.1.0 — 写真1枚のタグ検出・px・距離・推定fxを確認</div>
+    <div class="ver">p0.1.1 — 写真1枚のタグ検出・px・距離・推定fxを確認</div>
 
     <div class="panel">
         <label>タグ黒部サイズ（mm・写すタグに合わせる）</label><br>
@@ -80,7 +80,7 @@
     // 隣接コーナー4辺の平均長（px）
     function edgePx(c){
         let s = 0;
-        for (let i = 0; i < 4; i++){ const a = c[i], b = c[(i+1)%4]; s += Math.hypot(a[0]-b[0], a[1]-b[1]); }
+        for (let i = 0; i < 4; i++){ const a = c[i], b = c[(i+1)%4]; s += Math.hypot(b.x-a.x, b.y-a.y); }
         return s / 4;
     }
 
@@ -122,10 +122,11 @@
         cctx.font = `${Math.max(16, W/80)}px sans-serif`;
         for (const d of dets){
             const c = d.corners;
-            cctx.beginPath(); cctx.moveTo(c[0][0], c[0][1]);
-            for (let i = 1; i < 4; i++) cctx.lineTo(c[i][0], c[i][1]);
+            cctx.beginPath(); cctx.moveTo(c[0].x, c[0].y);
+            for (let i = 1; i < 4; i++) cctx.lineTo(c[i].x, c[i].y);
             cctx.closePath(); cctx.stroke();
-            cctx.fillText('ID'+d.id, d.center[0], d.center[1]);
+            const cx=(c[0].x+c[1].x+c[2].x+c[3].x)/4, cy=(c[0].y+c[1].y+c[2].y+c[3].y)/4;
+            cctx.fillText('ID'+d.id, cx, cy);
         }
 
         // 結果ログ
