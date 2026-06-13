@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.3.1';
+    const _V = 'pa0.3.2';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -29,7 +29,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.3.1 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+    <div class="ver">pa0.3.2 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
 
     <div class="panel">
         <div><label>ターゲット</label>
@@ -384,7 +384,7 @@
             if(!res){ floorFrames.pop(); log(`　床タグ${n}枚（構築失敗→却下）`); continue; }
             // 1〜2枚目は無条件採用（残差は2枚以上で初めて意味を持つ）。
             // 3枚目以降は平面度・残差中央のどちらかが悪化したら却下（悪い観測でマップを汚さない）
-            const worse = floorFrames.length>2 && (res.planar>lastPlanar+1.0 || res.medRms>lastMedRms+1.0);
+            const worse = floorFrames.length>2 && (res.planar>lastPlanar || res.medRms>lastMedRms);
             if(!worse){
                 applyFloorMap(res, floorFrames.length); lastPlanar=res.planar; lastMedRms=res.medRms;
             } else {
