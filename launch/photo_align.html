@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.4.0';
+    const _V = 'pa0.5.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,26 +42,38 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.3.2 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+    <div class="ver">pa0.5.0 Step2 — 床マップ共通で4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー）</div>
 
     <div class="panel">
-        <div><label>ターゲット</label>
-        <select id="targetSelect">
-            <option value="facetA">ファセットボス前（ID1〜8）</option>
-            <option value="facetB">ファセットボス後（ID9〜16）</option>
-            <option value="diag">ドデカ診断（ID2〜12）</option>
-        </select></div>
-        <div style="margin-top:6px;"><label>写真fx（暫定。12MP=1958）</label>
+        <div style="margin-top:0;"><label>写真fx（暫定。12MP=1958）</label>
         <input id="fxInput" type="number" value="1958" min="500" max="12000" step="1"></div>
         <div style="margin-top:6px;"><label>床タグ黒部mm</label>
         <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
         <div style="margin-top:8px;">
             <button id="floorBtn" class="sec">🗺️ 床マップを写真で作成</button>
             <button id="floorResetBtn" class="sec">床リセット</button>
-            <button id="pickBtn">📷 測定写真を選ぶ</button>
             <button id="copyLogBtn" class="sec">ログ全コピー</button>
         </div>
         <div id="state" style="color:#888;font-size:12px;margin-top:8px;">モデル/床マップ未確認</div>
+    </div>
+
+    <!-- Step2: 4輪測定 -->
+    <div class="panel">
+        <div style="font-size:14px;font-weight:600;margin-bottom:6px;">📐 4輪測定（Step2）</div>
+        <div style="color:#888;font-size:12px;margin-bottom:8px;">
+            運用: 床マップと車は動かさず、左側2輪を1枚で撮る→ボスを右へ付け替え→右側2輪を撮る。
+            1枚に 前ボスA(ID1〜8) と 後ボスB(ID9〜16) の両方が写っていればOK。
+        </div>
+        <div><label>この写真の側</label>
+        <select id="sideSelect">
+            <option value="L">左側（前ボスA→左前 / 後ボスB→左後）</option>
+            <option value="R">右側（前ボスA→右前 / 後ボスB→右後）</option>
+        </select></div>
+        <div style="margin-top:8px;">
+            <button id="measureBtn">📷 測定写真を選ぶ（A/B同時）</button>
+            <button id="slotResetBtn" class="sec">4輪クリア</button>
+        </div>
+        <div id="alignTable" style="margin-top:10px;"></div>
     </div>
 
     <div id="result"></div>
@@ -90,47 +102,56 @@
     let photoFx = 1958;
     const camK1 = 0;              // k1=0確定（iOSは歪み補正済み）
 
-    // ===== ターゲット定義（align4と同じ）=====
-    const TARGETS = {
-        diag:   { label:'ドデカ診断',       idMin:2,  idMax:12, modelKey:'scanscope_diag_model',   group:'A' },
-        facetA: { label:'ファセットボス前', idMin:1, idMax:8,  size:55, sizeById:{1:80}, modelKey:'scanscope_dodeca_model', group:'A' },
-        facetB: { label:'ファセットボス後', idMin:9, idMax:16, size:55, sizeById:{9:80}, modelKey:'scanscope_dodeca_model', group:'B' },
-    };
-    let target = TARGETS.facetA;
-    function wheelTagSizeM(id){
-        if (target.size == null) return 0.036;
-        return ((target.sizeById && target.sizeById[id]) || target.size)/1000;
-    }
-
     // ===== 床マップ・本体モデル（align4のlocalStorageを共有）=====
     function loadFloorWorld(){
         try { const s = localStorage.getItem('scanscope_floor_world'); if (s) return JSON.parse(s); } catch(e) {}
         return null;
     }
     let floorWorld = loadFloorWorld();
-    let bodyModel = null, bodyQ = null, bodyQs = null, modelSpanMm = 0;
-    function loadBodyModel(){
-        bodyModel = bodyQ = bodyQs = null; modelSpanMm = 0;
+    // グループ別モデル（A=前ボス・B=後ボス）。Step2は両方を1枚から処理する。
+    // idMin（上面タグ）はリング軸の符号統一に使う（bodyAxis相当）。
+    const GROUP_DEF = { A:{idMin:1, label:'前A'}, B:{idMin:9, label:'後B'} };
+    function loadGroupModel(group){
         try {
-            const s = localStorage.getItem(target.modelKey);
-            if (!s) return;
-            const grp = JSON.parse(s)[target.group];
-            if (grp && grp.P && Object.keys(grp.P).length >= 3) {
-                bodyModel = grp.P; bodyQ = grp.Q||null; bodyQs = grp.Qs||null;
-                const ids = Object.keys(bodyModel);
-                for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++){
-                    const a=bodyModel[ids[i]], b=bodyModel[ids[j]];
-                    const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])*1000;
-                    if (d>modelSpanMm) modelSpanMm=d;
-                }
+            const s = localStorage.getItem('scanscope_dodeca_model');
+            if (!s) return null;
+            const grp = JSON.parse(s)[group];
+            if (!(grp && grp.P && Object.keys(grp.P).length >= 3)) return null;
+            const P = grp.P; let span = 0;
+            const ids = Object.keys(P);
+            for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++){
+                const a=P[ids[i]], b=P[ids[j]];
+                const d=Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])*1000;
+                if (d>span) span=d;
             }
-        } catch(e) {}
+            return { P, Q:grp.Q||null, Qs:grp.Qs||null, spanMm:span, group, idMin:GROUP_DEF[group].idMin };
+        } catch(e) { return null; }
     }
+    let models = { A:null, B:null };
+    function loadModels(){ models.A = loadGroupModel('A'); models.B = loadGroupModel('B'); }
+
+    // ===== ホイール軸（モデル座標・上面側を正に統一）= dodecaのbodyAxis相当 =====
+    // リングタグ中心は対称軸に垂直な円上に並ぶ → その法線＝真のホイール軸。
+    // モデルz軸は数十度ズレるため必ずこれを使う（クロッキング/スピンでトーが振れる事故対策）。
+    function groupAxisModel(M){
+        if (!M || !M.P) return null;
+        const ringIds = Object.keys(M.P).map(Number).filter(id => id !== M.idMin);
+        if (ringIds.length < 3) return null;
+        let n = WMGeom.ringAxis(ringIds.map(i=>M.P[i]));
+        if (!n) return null;
+        const top = M.P[M.idMin];
+        if (top){
+            const cen=[0,0,0]; ringIds.forEach(i=>{for(let k=0;k<3;k++)cen[k]+=M.P[i][k]/ringIds.length;});
+            if((top[0]-cen[0])*n[0]+(top[1]-cen[1])*n[1]+(top[2]-cen[2])*n[2] < 0) n=[-n[0],-n[1],-n[2]];
+        }
+        return n;
+    }
+
     function refreshState(){
-        loadBodyModel(); floorWorld = loadFloorWorld();
-        const m = bodyModel ? `モデル${Object.keys(bodyModel).length}面${bodyQ?'(PnP可)':'(PnP不可)'}` : '❌モデル無';
-        const f = floorWorld ? `床マップ${Object.keys(floorWorld).length}枚` : '❌床マップ無（align4で床キャリブを）';
-        $('state').textContent = `${target.label} / ${m} / ${f}`;
+        loadModels(); floorWorld = loadFloorWorld();
+        const mtxt = g => models[g] ? `${GROUP_DEF[g].label}:${Object.keys(models[g].P).length}面${models[g].Q?'(PnP可)':'(PnP不可)'}` : `${GROUP_DEF[g].label}:無`;
+        const f = floorWorld ? `床マップ${Object.keys(floorWorld).length}枚` : '❌床マップ無（align4 or 上の🗺️で作成）';
+        $('state').textContent = `${mtxt('A')} / ${mtxt('B')} / ${f}`;
     }
 
     // ===== 行列ユーティリティ（align4と同じ）=====
@@ -151,7 +172,6 @@
     function camK(){ return {fx:photoFx, fy:photoFx, cx:imgW/2, cy:imgH/2, k1:camK1}; }
     function floorK1T(d){ return d.pose.t; }  // k1=0前提（歪み補正済み）→ホモグラフィのpose.tをそのまま使う
     function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
-    function extractYaw(R){ return Math.atan2(R[0][2], R[2][2]) * 180 / Math.PI; }
 
     // ===== カメラ自己位置（床タグ→世界、align4と同じ）=====
     function localizeCamera(visibleFloor) {
@@ -192,8 +212,11 @@
         return best.e/4<th ? best.arr : null;
     }
 
+    function tagSizeOf(id, M){ return id===M.idMin ? 0.080 : 0.055; }  // facet: 上面80mm/側面55mm
+
     // ===== ホイール姿勢推定（Horn初期化→コーナーPnP、align4と同じ）=====
-    function estimateWheelPose(wheelDets, cameraPose) {
+    function estimateWheelPose(wheelDets, cameraPose, M) {
+        const bodyModel = M && M.P, bodyQ = M && M.Q, bodyQs = M && M.Qs, modelSpanMm = M && M.spanMm;
         if (!bodyModel) return { err:'モデル未読込' };
         const valid = wheelDets.filter(d => bodyModel[String(d.id)]);
         if (valid.length < 4) return { err:`${valid.length}面<4（絶対測定は4面以上必須）` };
@@ -215,7 +238,7 @@
                 if (!q) continue;
                 if (bodyQs && bodyQs[id]!=null && bodyQs[id]<0.25) continue;
                 const p0 = bodyModel[id];
-                const hh = wheelTagSizeM(d.id)/2;
+                const hh = tagSizeOf(d.id, M)/2;
                 const Xc = TAG_LOCAL(hh).map(l=>{ const v=WMGeom.matVec3(q,l); return [p0[0]+v[0],p0[1]+v[1],p0[2]+v[2]]; });
                 const ord = resolveCornerOrderA(Xc, d.corners.map(c=>[c.x,c.y]), Rcam, t0);
                 if (!ord) continue;
@@ -278,8 +301,24 @@
     }
     initDetector().catch(e=>log('❌ 初期化失敗: '+e.message));
 
-    // ===== 写真処理（process相当・videoの代わりに静止画）=====
-    function processPhoto(img){
+    // ===== Step2: 4輪スロット＋トー算出 =====
+    // 各スロットに world系ホイール軸ベクトル(axW)を保持。トーは「向きだけ」で完結（位置不要）。
+    const UP = [0,1,0];  // 床world座標の鉛直（床法線）。computeFloorMapでworld y=床法線。
+    let slots = { FL:null, FR:null, RL:null, RR:null };
+    const SLOT_LABEL = { FL:'左前', FR:'右前', RL:'左後', RR:'右後' };
+    // 前方ベクトル: ホイール軸を水平面内で90°回す。左右で軸が反平行なので側で符号を変え車前方に揃える。
+    // ⚠ トーイン/アウトの符号は実車データで最終確認する（左右の付け替え向きに依存）。
+    function fwdOf(axW, slot){
+        const isLeft = (slot==='FL'||slot==='RL');
+        const f = isLeft ? vcross(UP, axW) : vcross(axW, UP);
+        return vnorm(f);
+    }
+    function signedAngle(a, b){  // a→b の符号付き角（UP右ねじ・度）
+        const cr = vcross(a,b);
+        return Math.atan2(vdot(cr,UP), vdot(a,b)) * 180/Math.PI;
+    }
+
+    function measurePhoto(img, side){
         if(!detector){ log('❌ detector未初期化'); return; }
         imgW = img.naturalWidth; imgH = img.naturalHeight;
         canvas.width = imgW; canvas.height = imgH;
@@ -288,7 +327,7 @@
         photoFx = parseFloat($('fxInput').value) || 1958;
         const floorSz = (parseFloat($('floorSizeInput').value)||199.42)/1000;
         detector.set_camera_info(photoFx, photoFx, imgW/2, imgH/2);
-        for (let id=target.idMin; id<=target.idMax; id++) detector.set_tag_size(id, wheelTagSizeM(id));
+        for (let id=1; id<=16; id++) detector.set_tag_size(id, (id===1||id===9)?0.080:0.055);
         for (const id of FLOOR_IDS) detector.set_tag_size(id, floorSz);
 
         const idata = cctx.getImageData(0,0,imgW,imgH);
@@ -297,42 +336,95 @@
         let dets=[]; try{ dets=detector.detect(gray,imgW,imgH)||[]; }catch(e){ log('❌ detect例外: '+e.message); return; }
 
         const floorDets = dets.filter(d => d.pose && FLOOR_IDS.includes(d.id) && tagPx(d)>=MIN_FLOOR_PX);
-        const wheelDets = dets.filter(d => d.pose && d.id>=target.idMin && d.id<=target.idMax && tagPx(d)>=MIN_WHEEL_PX);
 
         // 描画
         cctx.lineWidth=Math.max(2,imgW/500); cctx.font=`${Math.max(16,imgW/80)}px sans-serif`;
         const drawDet=(d,col)=>{ const c=d.corners; cctx.strokeStyle=col; cctx.fillStyle=col;
             cctx.beginPath(); cctx.moveTo(c[0].x,c[0].y); for(let i=1;i<4;i++)cctx.lineTo(c[i].x,c[i].y); cctx.closePath(); cctx.stroke();
             const cx=(c[0].x+c[1].x+c[2].x+c[3].x)/4, cy=(c[0].y+c[1].y+c[2].y+c[3].y)/4; cctx.fillText('ID'+d.id,cx,cy); };
-        floorDets.forEach(d=>drawDet(d,'#ffd700')); wheelDets.forEach(d=>drawDet(d,'#00ff00'));
+        floorDets.forEach(d=>drawDet(d,'#ffd700'));
 
-        // カメラ自己位置
+        log('────────────');
+        log(`[${side==='L'?'左側':'右側'}] 解像度${imgW}×${imgH} fx${photoFx} | 床タグ${floorDets.length}枚`);
+
         let cameraPose=null;
         if(floorDets.length>=3){
-            const visible=floorDets.map(d=>({id:d.id, t:floorK1T(d)}));
-            cameraPose=localizeCamera(visible);
+            cameraPose=localizeCamera(floorDets.map(d=>({id:d.id, t:floorK1T(d)})));
         }
-        // ホイール姿勢
-        const est=estimateWheelPose(wheelDets, cameraPose);
-
-        // 結果
-        log('────────────');
-        log(`解像度${imgW}×${imgH} fx${photoFx} | 床タグ${floorDets.length}枚 ボスタグ${wheelDets.length}枚`);
-        if(cameraPose) log(`カメラ自己位置: 床PnP rms${(cameraPose.rms*1000).toFixed(1)}mm 高さ${(cameraPose.camH*100).toFixed(0)}cm`);
-        else log(`⚠ カメラ自己位置なし（床タグ3枚以上必要・現在${floorDets.length}枚）→ world yaw不可`);
-
-        if(est && est.R){
-            const yaw=extractYaw(est.R);
-            const wn = est.mode==='world' ? 'world（絶対）' : 'camera（カメラ基準・絶対でない）';
-            $('result').innerHTML = `<div>world yaw <span class="yaw">${yaw>=0?'+':''}${yaw.toFixed(2)}°</span></div>`
-                + `<div style="font-size:12px;color:#888;">${wn} / ${est.faces}面 ${est.method} ${est.pnpRms!=null?est.pnpRms.toFixed(1)+'px':''} Horn残差${est.residual.toFixed(1)}mm</div>`;
-            log(`<RESULT> yaw ${yaw.toFixed(2)}° (${est.mode}) ${est.faces}面 ${est.method}${est.pnpRms!=null?' '+est.pnpRms.toFixed(1)+'px':''} Horn${est.residual.toFixed(1)}mm`);
-            if(est.mode!=='world') log('⚠ world座標になっていません（床タグ3枚以上＋床マップ必須）。yawはカメラ基準で絶対比較に使えません');
-        } else {
-            $('result').innerHTML = `<div style="color:#ff6b6b;">ボス姿勢が出ません: ${est?est.err:'不明'}</div>`;
-            log(`❌ ボス姿勢NG: ${est?est.err:'不明'}`);
+        if(!cameraPose){
+            log(`⚠ カメラ自己位置なし（床タグ3枚以上必要・現在${floorDets.length}枚）→ この写真はスキップ`);
+            $('result').innerHTML = `<div style="color:#ff6b6b;">床タグ${floorDets.length}枚（3枚以上必要）→ world座標が出ません</div>`;
+            return;
         }
+        log(`カメラ自己位置: 床PnP rms${(cameraPose.rms*1000).toFixed(1)}mm 高さ${(cameraPose.camH*100).toFixed(0)}cm`);
+
+        loadModels();
+        const GRP = [
+            { g:'A', min:1, max:8,  slot: side==='L'?'FL':'FR' },
+            { g:'B', min:9, max:16, slot: side==='L'?'RL':'RR' },
+        ];
+        let okCount=0;
+        for(const G of GRP){
+            const wheelDets = dets.filter(d => d.pose && d.id>=G.min && d.id<=G.max && tagPx(d)>=MIN_WHEEL_PX);
+            wheelDets.forEach(d=>drawDet(d, G.g==='A'?'#00ff00':'#00bfff'));
+            const M = models[G.g];
+            if(!M){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): モデル無→スキップ`); continue; }
+            if(wheelDets.length===0){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): ボスタグ未検出→スキップ`); continue; }
+            const est = estimateWheelPose(wheelDets, cameraPose, M);
+            if(!(est && est.R && est.mode==='world')){
+                log(`　${SLOT_LABEL[G.slot]}(${G.g}): ${est? (est.err||est.mode) : 'NG'}`);
+                continue;
+            }
+            const axM = groupAxisModel(M);
+            if(!axM){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): リング軸算出不可（リング3面未満）`); continue; }
+            const axW = vnorm(matVec(est.R, axM));   // world系ホイール軸
+            slots[G.slot] = { axW, faces:est.faces, method:est.method, pnpRms:est.pnpRms, residual:est.residual, side, group:G.g };
+            okCount++;
+            log(`　✅ ${SLOT_LABEL[G.slot]} ← ${G.g} ${est.faces}面 ${est.method}${est.pnpRms!=null?' '+est.pnpRms.toFixed(1)+'px':''} Horn${est.residual.toFixed(1)}mm`);
+        }
+        $('result').innerHTML = `<div style="font-size:14px;">この写真: <b>${okCount}輪</b>を記録（${side==='L'?'左側':'右側'}）</div>`;
+        renderAlign();
     }
+
+    // 4スロットから総トー・スラストライン・個別トーを計算して表示
+    function renderAlign(){
+        const fwd = {};
+        for(const s of ['FL','FR','RL','RR']) if(slots[s]) fwd[s] = fwdOf(slots[s].axW, s);
+
+        const row = s => {
+            const v = slots[s];
+            if(!v) return `<tr><td>${SLOT_LABEL[s]}</td><td colspan="2" style="color:#666;">未測定</td></tr>`;
+            const yaw = Math.atan2(fwd[s][0], fwd[s][2])*180/Math.PI;
+            return `<tr><td>${SLOT_LABEL[s]}</td><td>ヨー ${yaw>=0?'+':''}${yaw.toFixed(2)}°</td>`
+                 + `<td style="color:#888;">${v.faces}面 ${v.method}${v.pnpRms!=null?' '+v.pnpRms.toFixed(1)+'px':''}</td></tr>`;
+        };
+        let html = `<table style="width:100%;border-collapse:collapse;font-size:13px;">`
+            + `<tr style="color:#888;"><th align="left">輪</th><th align="left">world向き</th><th align="left">品質</th></tr>`
+            + row('FL')+row('FR')+row('RL')+row('RR') + `</table>`;
+
+        // 集計（向きのみ・位置不要）
+        const have = s => !!slots[s];
+        const lines = [];
+        if(have('FL') && have('FR')) lines.push(`総トー(前) = <b>${fmtToe(signedAngle(fwd.FL, fwd.FR))}</b>`);
+        if(have('RL') && have('RR')) lines.push(`総トー(後) = <b>${fmtToe(signedAngle(fwd.RL, fwd.RR))}</b>`);
+        if(have('RL') && have('RR')){
+            const thrust = vnorm([fwd.RL[0]+fwd.RR[0], fwd.RL[1]+fwd.RR[1], fwd.RL[2]+fwd.RR[2]]);
+            // 個別トー = 各輪 vs スラストライン（後輪二等分線）。スラストライン主役（向きのみで完結）。
+            const ind = [];
+            for(const s of ['FL','FR','RL','RR']) if(have(s)) ind.push(`${SLOT_LABEL[s]} ${fmtToe(signedAngle(thrust, fwd[s]))}`);
+            lines.push(`スラストライン基準 個別トー: ${ind.join(' / ')}`);
+        }
+        if(lines.length){
+            html += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid #333;font-size:14px;line-height:1.9;">`
+                + lines.join('<br>') + `</div>`
+                + `<div style="color:#666;font-size:11px;margin-top:6px;">`
+                + `※符号(トーイン/アウト)は実車データで要校正。スラスト角はセンターライン(位置)が必要なため未算出。</div>`;
+        } else {
+            html += `<div style="color:#888;font-size:12px;margin-top:8px;">同軸2輪が揃うと総トー、後輪2輪が揃うとスラストライン基準の個別トーを表示します。</div>`;
+        }
+        $('alignTable').innerHTML = html;
+    }
+    function fmtToe(deg){ return `${deg>=0?'+':''}${deg.toFixed(2)}°`; }
 
     // ===== 床マップを写真で作成（finishFloorCalibを写真入力に移植）=====
     // 1枚の写真の床タグ中心位置を1フレームとして集める。複数枚なら精度UP（buildBodyが集約）
@@ -411,7 +503,6 @@
     }
 
     // ===== UI =====
-    $('targetSelect').onchange = () => { target = TARGETS[$('targetSelect').value]||TARGETS.facetA; refreshState(); };
     const floorFileInput = document.createElement('input');
     floorFileInput.type='file'; floorFileInput.accept='image/*'; floorFileInput.multiple=true; floorFileInput.style.display='none';
     document.body.appendChild(floorFileInput);
@@ -458,20 +549,28 @@
             }
         }
     };
-    $('pickBtn').onclick = () => $('photoInput').click();
     $('copyLogBtn').onclick = () => {
         const ordered = logText.split('\n').reverse().join('\n');
         navigator.clipboard.writeText(ordered).then(()=>{ $('copyLogBtn').textContent='コピー済み✓'; setTimeout(()=>$('copyLogBtn').textContent='ログ全コピー',2000); }).catch(()=>log('❌コピー失敗'));
     };
-    const photoInput = document.createElement('input');
-    photoInput.type='file'; photoInput.accept='image/*'; photoInput.id='photoInput'; photoInput.style.display='none';
-    document.body.appendChild(photoInput);
-    photoInput.onchange = e => {
-        const f=e.target.files[0]; if(!f) return;
+    // Step2: 測定写真（A/B同時・選んだ側の前後スロットに記録）
+    const measureInput = document.createElement('input');
+    measureInput.type='file'; measureInput.accept='image/*'; measureInput.style.display='none';
+    document.body.appendChild(measureInput);
+    $('measureBtn').onclick = () => measureInput.click();
+    measureInput.onchange = e => {
+        const f=e.target.files[0]; if(!f){ return; }
+        const side = $('sideSelect').value;
         const img=new Image();
-        img.onload=()=>{ processPhoto(img); URL.revokeObjectURL(img.src); };
+        img.onload=()=>{ measurePhoto(img, side); URL.revokeObjectURL(img.src); measureInput.value=''; };
         img.onerror=()=>log('❌ 画像読み込み失敗');
         img.src=URL.createObjectURL(f);
+    };
+    $('slotResetBtn').onclick = () => {
+        slots = { FL:null, FR:null, RL:null, RR:null };
+        $('alignTable').innerHTML=''; $('result').innerHTML='';
+        log('🧹 4輪スロットをクリア');
+        renderAlign();
     };
     </script>
 </body>
