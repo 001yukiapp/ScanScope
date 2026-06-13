@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.7.0';
+    const _V = 'pa0.8.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.7.0 Step3 — 4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー/スラスト角）</div>
+    <div class="ver">pa0.8.0 — ボスキャリブ写真化＋4輪測定Step1-3（総トー/スラストライン/個別トー/スラスト角）</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -55,6 +55,26 @@
             <button id="copyLogBtn" class="sec">ログ全コピー</button>
         </div>
         <div id="state" style="color:#888;font-size:12px;margin-top:8px;">モデル/床マップ未確認</div>
+    </div>
+
+    <!-- ボスキャリブ（写真） -->
+    <div class="panel">
+        <div style="font-size:14px;font-weight:600;margin-bottom:6px;">🔧 ボスキャリブ（写真）</div>
+        <div style="color:#888;font-size:12px;margin-bottom:8px;">
+            ボスのモデル(P/Q)を写真で作る（dodecaのライブキャリブの写真版）。<b>最初に上面タグ(ID1/9)を正面から1枚</b>→
+            続けて色々な角度・距離から複数枚（毎回4面以上写るように）。撮ったら「モデルを作る」。
+        </div>
+        <div><label>対象ボス</label>
+        <select id="calibTargetSelect">
+            <option value="A">前ボスA（ID1〜8）</option>
+            <option value="B">後ボスB（ID9〜16）</option>
+        </select></div>
+        <div style="margin-top:8px;">
+            <button id="calibPickBtn">📷 キャリブ写真を選ぶ（複数）</button>
+            <button id="calibRunBtn" class="sec">モデルを作る</button>
+            <button id="calibResetBtn" class="sec">蓄積リセット</button>
+        </div>
+        <div id="calibState" style="color:#888;font-size:12px;margin-top:8px;">未蓄積</div>
     </div>
 
     <!-- Step2: 4輪測定 -->
@@ -464,6 +484,87 @@
     }
     function fmtToe(deg){ return `${deg>=0?'+':''}${deg.toFixed(2)}°`; }
 
+    // ===== ボスキャリブ（写真・dodecaのライブキャリブを写真入力に移植）=====
+    // 各写真=1フレーム。pos{id:t}・rot{id:[R候補(pose.R + asol.R)]}を蓄積し、
+    // buildBodyでP構築 → R_tag_body=R_body_cam^T·R_tag_cam を全フレームから集め
+    // 外向き事前重み付きpickStableRotationでQ確定（flip解は視線反射で散り負ける）。
+    let calibPosFrames=[], calibRotFrames=[];
+    function detectBossFrame(img, idMin, idMax){
+        const W=img.naturalWidth, H=img.naturalHeight; imgW=W; imgH=H;
+        canvas.width=W; canvas.height=H; cctx.drawImage(img,0,0,W,H);
+        photoFx=parseFloat($('fxInput').value)||2868;
+        detector.set_camera_info(photoFx,photoFx,W/2,H/2);
+        for(let id=1;id<=16;id++) detector.set_tag_size(id,(id===1||id===9)?0.080:0.055);
+        const idata=cctx.getImageData(0,0,W,H);
+        const gray=new Uint8Array(W*H);
+        for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
+        let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+        const bd=dets.filter(d=>d.pose&&d.pose.t&&d.id>=idMin&&d.id<=idMax&&tagPx(d)>=MIN_WHEEL_PX);
+        const fr={}, rr={};
+        for(const d of bd){
+            fr[d.id]=d.pose.t;
+            const c=[]; if(d.pose.R)c.push(d.pose.R); if(d.pose.asol&&d.pose.asol.R)c.push(d.pose.asol.R);
+            rr[d.id]=c;
+        }
+        return { fr, rr, n:bd.length, bd };
+    }
+    function updateCalibState(){
+        $('calibState').textContent = calibPosFrames.length
+            ? `蓄積${calibPosFrames.length}枚（「モデルを作る」で構築）`
+            : '未蓄積';
+    }
+    function runBossCalib(){
+        const g=$('calibTargetSelect').value;
+        if(calibPosFrames.length<3){ log(`キャリブには3枚以上必要（現在${calibPosFrames.length}枚）`); return; }
+        const idset=new Set(); calibPosFrames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
+        const { pos, placed, failed }=WMGeom.buildBody([...idset], calibPosFrames);
+        if(placed.length<3){ log(`❌ 構築失敗: 配置${placed.length}面（視点の多様性不足）`); return; }
+        // 残差中央（各フレームをモデルに当てたHorn残差）
+        const rmss=[];
+        for(const fr of calibPosFrames){ const fids=Object.keys(fr).filter(id=>pos[id]); if(fids.length<3)continue;
+            rmss.push(WMGeom.hornPose(fids.map(id=>pos[id]),fids.map(id=>fr[id])).rms*1000); }
+        rmss.sort((a,b)=>a-b); const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
+        // Q学習（finishCalibrate移植）
+        const cen=[0,0,0]; const pids=Object.keys(pos);
+        for(const id of pids) for(let a=0;a<3;a++) cen[a]+=pos[id][a]/pids.length;
+        const rotCands={}, rotWts={};
+        for(let fi=0;fi<calibPosFrames.length;fi++){
+            const fr=calibPosFrames[fi], rr=calibRotFrames[fi]||{};
+            const fids=Object.keys(fr).filter(id=>pos[id]);
+            if(fids.length<3) continue;
+            const bodySol=WMGeom.hornPose(fids.map(id=>pos[id]), fids.map(id=>fr[id]));
+            const RbcT=WMGeom.matT3(bodySol.R);
+            for(const id of fids){
+                const out=[pos[id][0]-cen[0], pos[id][1]-cen[1], pos[id][2]-cen[2]];
+                const on=Math.hypot(out[0],out[1],out[2])||1;
+                for(const Rtc of (rr[id]||[])){
+                    const Rtb=WMGeom.matMul3(RbcT,Rtc);
+                    const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
+                    (rotCands[id]=rotCands[id]||[]).push(Rtb);
+                    (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot));
+                }
+            }
+        }
+        const Q={}, Qs={}; let candTotal=0; const sups=[];
+        for(const id of pids){
+            const cands=rotCands[id]||[]; candTotal+=cands.length;
+            const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
+            sups.push(pick?pick.support:0);
+            if(!pick || pick.support<0.25) continue;
+            const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
+            Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
+            Qs[id]=pick.support;
+        }
+        // 保存（dodecaと共有 scanscope_dodeca_model）
+        let modelObj={}; try{ modelObj=JSON.parse(localStorage.getItem('scanscope_dodeca_model')||'{}'); }catch(e){}
+        modelObj[g]={ P:pos, Q, Qs, meta:{ rms:+medRms.toFixed(1), at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}), src:'photo' } };
+        localStorage.setItem('scanscope_dodeca_model', JSON.stringify(modelObj));
+        const supMax=sups.length?Math.round(Math.max(...sups)*100):0, supMin=sups.length?Math.round(Math.min(...sups)*100):0;
+        log(`✅ ボス${g}モデル作成(写真): ${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
+        if(Object.keys(Q).length<placed.length) log(`　⚠ 向き未学習の面あり（PnP対象外）→ その面を正面から数枚追加すると改善`);
+        refreshState();
+    }
+
     // ===== 床マップを写真で作成（finishFloorCalibを写真入力に移植）=====
     // 1枚の写真の床タグ中心位置を1フレームとして集める。複数枚なら精度UP（buildBodyが集約）
     function detectFloorFrame(img){
@@ -609,6 +710,30 @@
         $('alignTable').innerHTML=''; $('result').innerHTML='';
         log('🧹 4輪スロットをクリア');
         renderAlign();
+    };
+    // ボスキャリブ（写真）
+    const calibInput = document.createElement('input');
+    calibInput.type='file'; calibInput.accept='image/*'; calibInput.multiple=true; calibInput.style.display='none';
+    document.body.appendChild(calibInput);
+    $('calibPickBtn').onclick = () => calibInput.click();
+    calibInput.onchange = async e => {
+        const files=[...e.target.files]; if(!files.length) return;
+        const g=$('calibTargetSelect').value, idMin=g==='A'?1:9, idMax=g==='A'?8:16;
+        log(`🔧 キャリブ写真${files.length}枚を追加（ボス${g}・蓄積中${calibPosFrames.length}枚）...`);
+        for(const f of files){
+            const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
+            const { fr, rr, n }=detectBossFrame(img, idMin, idMax);
+            URL.revokeObjectURL(img.src);
+            if(n<2){ log(`　ボスタグ${n}枚（2枚未満→スキップ）`); continue; }
+            calibPosFrames.push(fr); calibRotFrames.push(rr);
+            log(`　+1枚（ボスタグ${n}面）`);
+        }
+        updateCalibState(); calibInput.value='';
+    };
+    $('calibRunBtn').onclick = () => runBossCalib();
+    $('calibResetBtn').onclick = () => {
+        calibPosFrames=[]; calibRotFrames=[]; updateCalibState();
+        log('🧹 キャリブ写真の蓄積をリセット（モデル自体は消えません）');
     };
     </script>
 </body>
