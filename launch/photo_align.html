@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.5.0';
+    const _V = 'pa0.6.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,11 +42,11 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.5.0 Step2 — 床マップ共通で4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー）</div>
+    <div class="ver">pa0.6.0 Step2 — 床マップ共通で4輪を1世界座標に繋ぐ（総トー/スラストライン/個別トー）</div>
 
     <div class="panel">
-        <div style="margin-top:0;"><label>写真fx（暫定。12MP=1958）</label>
-        <input id="fxInput" type="number" value="1958" min="500" max="12000" step="1"></div>
+        <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
+        <input id="fxInput" type="number" value="2868" min="500" max="12000" step="1"></div>
         <div style="margin-top:6px;"><label>床タグ黒部mm</label>
         <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
         <div style="margin-top:8px;">
@@ -99,7 +99,7 @@
     let floorFrames = [];          // 床マップ用に蓄積したフレーム（写真ごと1フレーム）
     let lastPlanar = Infinity;     // 直近採用時の平面度（悪化フレーム却下の基準）
     let lastMedRms = Infinity;     // 直近採用時の残差中央（同上・残差も悪化したら却下）
-    let photoFx = 1958;
+    let photoFx = 2868;  // iPhone14Pro 12MP写真(3024×4032)の実測fx（2026-06-13・カメラ高さ108.4cm校正・誤差0.55%）。旧暫定1958は動画fxの解像度スケールで46%過小だった
     const camK1 = 0;              // k1=0確定（iOSは歪み補正済み）
 
     // ===== 床マップ・本体モデル（align4のlocalStorageを共有）=====
@@ -324,7 +324,7 @@
         canvas.width = imgW; canvas.height = imgH;
         cctx.drawImage(img, 0, 0, imgW, imgH);
 
-        photoFx = parseFloat($('fxInput').value) || 1958;
+        photoFx = parseFloat($('fxInput').value) || 2868;
         const floorSz = (parseFloat($('floorSizeInput').value)||199.42)/1000;
         detector.set_camera_info(photoFx, photoFx, imgW/2, imgH/2);
         for (let id=1; id<=16; id++) detector.set_tag_size(id, (id===1||id===9)?0.080:0.055);
@@ -431,7 +431,7 @@
     function detectFloorFrame(img){
         const W=img.naturalWidth, H=img.naturalHeight; imgW=W; imgH=H;
         canvas.width=W; canvas.height=H; cctx.drawImage(img,0,0,W,H);
-        photoFx=parseFloat($('fxInput').value)||1958;
+        photoFx=parseFloat($('fxInput').value)||2868;
         const floorSz=(parseFloat($('floorSizeInput').value)||199.42)/1000;
         detector.set_camera_info(photoFx,photoFx,W/2,H/2);
         for(const id of FLOOR_IDS) detector.set_tag_size(id,floorSz);
