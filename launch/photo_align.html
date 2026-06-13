@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.3.0';
+    const _V = 'pa0.3.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -29,7 +29,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.3.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+    <div class="ver">pa0.3.1 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
 
     <div class="panel">
         <div><label>ターゲット</label>
@@ -69,6 +69,7 @@
     let imgW = 0, imgH = 0;        // 直近写真の解像度（camK用）
     let floorFrames = [];          // 床マップ用に蓄積したフレーム（写真ごと1フレーム）
     let lastPlanar = Infinity;     // 直近採用時の平面度（悪化フレーム却下の基準）
+    let lastMedRms = Infinity;     // 直近採用時の残差中央（同上・残差も悪化したら却下）
     let photoFx = 1958;
     const camK1 = 0;              // k1=0確定（iOSは歪み補正済み）
 
@@ -369,7 +370,7 @@
     floorFileInput.type='file'; floorFileInput.accept='image/*'; floorFileInput.multiple=true; floorFileInput.style.display='none';
     document.body.appendChild(floorFileInput);
     $('floorBtn').onclick = () => floorFileInput.click();
-    $('floorResetBtn').onclick = () => { floorFrames=[]; lastPlanar=Infinity; log('🗺️ 床マップ蓄積をリセット（次の写真から1枚目として作り直し）'); };
+    $('floorResetBtn').onclick = () => { floorFrames=[]; lastPlanar=Infinity; lastMedRms=Infinity; log('🗺️ 床マップ蓄積をリセット（次の写真から1枚目として作り直し）'); };
     floorFileInput.onchange = async e => {
         const files=[...e.target.files]; if(!files.length) return;
         log(`🗺️ 床写真${files.length}枚を追加処理（蓄積中: ${floorFrames.length}枚）...`);
@@ -381,12 +382,14 @@
             floorFrames.push(fr);
             const res=computeFloorMap(floorFrames);
             if(!res){ floorFrames.pop(); log(`　床タグ${n}枚（構築失敗→却下）`); continue; }
-            // 1枚目は無条件採用。2枚目以降は平面度が改善（+1mmマージン内）なら採用、悪化なら却下
-            if(floorFrames.length===1 || res.planar<=lastPlanar+1.0){
-                applyFloorMap(res, floorFrames.length); lastPlanar=res.planar;
+            // 1〜2枚目は無条件採用（残差は2枚以上で初めて意味を持つ）。
+            // 3枚目以降は平面度・残差中央のどちらかが悪化したら却下（悪い観測でマップを汚さない）
+            const worse = floorFrames.length>2 && (res.planar>lastPlanar+1.0 || res.medRms>lastMedRms+1.0);
+            if(!worse){
+                applyFloorMap(res, floorFrames.length); lastPlanar=res.planar; lastMedRms=res.medRms;
             } else {
                 floorFrames.pop();
-                log(`　床タグ${n}枚 → 平面度悪化 ${res.planar.toFixed(1)}>${lastPlanar.toFixed(1)}mm につき却下（不採用）`);
+                log(`　床タグ${n}枚 → 悪化につき却下: 平面度${res.planar.toFixed(1)}(前${lastPlanar.toFixed(1)}) 残差${res.medRms.toFixed(1)}(前${lastMedRms.toFixed(1)})`);
             }
         }
     };
