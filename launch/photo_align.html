@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.1.0';
+    const _V = 'pa0.2.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -29,7 +29,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.1.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
+    <div class="ver">pa0.2.0 Step1 — 写真1枚から world yaw（絶対向き）を出す</div>
 
     <div class="panel">
         <div><label>ターゲット</label>
@@ -43,7 +43,8 @@
         <div style="margin-top:6px;"><label>床タグ黒部mm</label>
         <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
         <div style="margin-top:8px;">
-            <button id="pickBtn">📷 写真を選ぶ</button>
+            <button id="floorBtn" class="sec">🗺️ 床マップを写真で作成</button>
+            <button id="pickBtn">📷 測定写真を選ぶ</button>
             <button id="copyLogBtn" class="sec">ログ全コピー</button>
         </div>
         <div id="state" style="color:#888;font-size:12px;margin-top:8px;">モデル/床マップ未確認</div>
@@ -120,6 +121,10 @@
     }
     function matVec(R,v){ return [R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2], R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2], R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]]; }
     function centroid3(pts){ const c=[0,0,0]; for(const p of pts){c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];} return [c[0]/pts.length,c[1]/pts.length,c[2]/pts.length]; }
+    function vsub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+    function vdot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+    function vcross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+    function vnorm(a){ const n=Math.hypot(a[0],a[1],a[2]); return n>1e-9?[a[0]/n,a[1]/n,a[2]/n]:a; }
 
     const TAG_LOCAL = h => [[-h,-h,0],[h,-h,0],[h,h,0],[-h,h,0]];
     function camK(){ return {fx:photoFx, fy:photoFx, cx:imgW/2, cy:imgH/2, k1:camK1}; }
@@ -308,8 +313,71 @@
         }
     }
 
+    // ===== 床マップを写真で作成（finishFloorCalibを写真入力に移植）=====
+    // 1枚の写真の床タグ中心位置を1フレームとして集める。複数枚なら精度UP（buildBodyが集約）
+    function detectFloorFrame(img){
+        const W=img.naturalWidth, H=img.naturalHeight; imgW=W; imgH=H;
+        canvas.width=W; canvas.height=H; cctx.drawImage(img,0,0,W,H);
+        photoFx=parseFloat($('fxInput').value)||1958;
+        const floorSz=(parseFloat($('floorSizeInput').value)||199.42)/1000;
+        detector.set_camera_info(photoFx,photoFx,W/2,H/2);
+        for(const id of FLOOR_IDS) detector.set_tag_size(id,floorSz);
+        const idata=cctx.getImageData(0,0,W,H);
+        const gray=new Uint8Array(W*H);
+        for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
+        let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
+        const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
+        const fr={}; for(const d of floorDets) fr[d.id]=floorK1T(d);
+        return { fr, n:floorDets.length };
+    }
+    function buildFloorMap(frames){
+        if(!frames.length){ log('❌ 床タグが写った写真がありません'); return; }
+        const idset=new Set(); frames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
+        const { pos, placed, failed } = WMGeom.buildBody([...idset], frames);
+        if(placed.length<3){ log(`❌ 床マップ失敗: 復元${placed.length}枚のみ。床タグ4枚が同時に写った写真を使ってください`); return; }
+        const ids=placed.map(Number).sort((a,b)=>a-b);
+        const o=pos[ids[0]];
+        const ex=vnorm(vsub(pos[ids[1]],o));
+        let n=null;
+        for(let k=2;k<ids.length;k++){ const c=vcross(ex,vsub(pos[ids[k]],o)); if(Math.hypot(c[0],c[1],c[2])>1e-6){ n=vnorm(c); break; } }
+        if(!n){ log('❌ 床マップ失敗: タグがほぼ一直線。2×2に並べ直してください'); return; }
+        const ey=n, ez=vcross(ex,ey);
+        const world={}; let maxOff=0;
+        for(const id of ids){ const d=vsub(pos[id],o); const p=[vdot(d,ex),vdot(d,ey),vdot(d,ez)]; maxOff=Math.max(maxOff,Math.abs(p[1])); world[id]=p; }
+        const rmss=[];
+        for(const fr of frames){ const fids=Object.keys(fr).filter(id=>world[id]); if(fids.length<3)continue; rmss.push(WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).rms*1000); }
+        rmss.sort((a,b)=>a-b);
+        const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
+        floorWorld=world;
+        localStorage.setItem('scanscope_floor_world', JSON.stringify(world));
+        const floorSz=(parseFloat($('floorSizeInput').value)||199.42)/1000;
+        localStorage.setItem('scanscope_floor_meta', JSON.stringify({ rms:+medRms.toFixed(1), planar:+(maxOff*1000).toFixed(1), k1:0, size:floorSz, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) }));
+        const dists=[];
+        for(let i=0;i<ids.length;i++)for(let j=i+1;j<ids.length;j++){ const dv=vsub(world[ids[j]],world[ids[i]]); dists.push(`${ids[i]}-${ids[j]}:${(Math.hypot(dv[0],dv[1],dv[2])*1000).toFixed(0)}mm`); }
+        log(`✅ 床マップ作成: ${ids.length}枚 残差中央${medRms.toFixed(1)}mm 平面度${(maxOff*1000).toFixed(1)}mm（写真${frames.length}枚${failed.length?` 欠${failed.length}`:''}）`);
+        log(`　中心間距離: ${dists.join(' ')}`);
+        refreshState();
+    }
+
     // ===== UI =====
     $('targetSelect').onchange = () => { target = TARGETS[$('targetSelect').value]||TARGETS.facetA; refreshState(); };
+    const floorFileInput = document.createElement('input');
+    floorFileInput.type='file'; floorFileInput.accept='image/*'; floorFileInput.multiple=true; floorFileInput.style.display='none';
+    document.body.appendChild(floorFileInput);
+    $('floorBtn').onclick = () => floorFileInput.click();
+    floorFileInput.onchange = async e => {
+        const files=[...e.target.files]; if(!files.length) return;
+        log(`🗺️ 床マップ用に${files.length}枚を処理中...`);
+        const frames=[];
+        for(const f of files){
+            const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
+            const { fr, n } = detectFloorFrame(img);
+            URL.revokeObjectURL(img.src);
+            log(`　写真: 床タグ${n}枚検出`);
+            if(Object.keys(fr).length>=2) frames.push(fr);
+        }
+        buildFloorMap(frames);
+    };
     $('pickBtn').onclick = () => $('photoInput').click();
     $('copyLogBtn').onclick = () => {
         const ordered = logText.split('\n').reverse().join('\n');
