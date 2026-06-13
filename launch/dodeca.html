@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.32.1';
+    const _V = 'd0.32.2';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.32.1</p>
+    <p style="color:#555;">d0.32.2</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -127,7 +127,6 @@
             <!-- type=numberはiOSキーボードにマイナスが無く負の目標Δが入力不能 → text型 -->
             <input id="voiceTargetInput" type="text" placeholder="目標Δ° 例-0.2" style="width:88px;padding:6px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:13px;text-align:center;">
             <button id="voiceBtn" class="sec">音声ガイド</button>
-            <button id="audioModeBtn" class="sec">音源:WebAudio</button>
         </span>
     </div>
 
@@ -1689,51 +1688,10 @@ $('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点�
 // ===== ビープ音ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
 // σ安定の自動確定ごとにビープ間隔でΔ残量を伝える。
 // 近づく→間隔短縮(ピ ピ ピ) / ±0.05°以内→長音(ピーーー) / 行き過ぎ→低音(ポーン ポーン)
-// 音源: WebAudio方式（OscillatorNode常時稼働）/ WAV方式（HTML5 audio fallback）を切替可
+// 音源: WebAudio方式（OscillatorNode常時稼働）一本
 const VOICE_TOL=0.05;
 let voiceTarget=null;
 let _beepTimer=null;
-
-// ===== WAV方式（fallback）: 現行コードをそのまま残す =====
-// 16bit PCM WAVをdata無しのBlob URLとして合成（freq Hz・dur ms・正弦波、減衰エンベロープ付き）
-function _makeToneWav(freq, dur, type='sine'){
-    const sr=22050, n=Math.round(sr*dur/1000);
-    const buf=new ArrayBuffer(44+n*2), dv=new DataView(buf);
-    const wstr=(off,s)=>{ for(let i=0;i<s.length;i++) dv.setUint8(off+i,s.charCodeAt(i)); };
-    wstr(0,'RIFF'); dv.setUint32(4,36+n*2,true); wstr(8,'WAVE');
-    wstr(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
-    dv.setUint32(24,sr,true); dv.setUint32(28,sr*2,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
-    wstr(36,'data'); dv.setUint32(40,n*2,true);
-    for(let i=0;i<n;i++){
-        const t=i/sr, ph=2*Math.PI*freq*t;
-        let s=Math.sin(ph);
-        if(type==='triangle') s=2/Math.PI*Math.asin(Math.sin(ph));
-        const env=Math.min(1, i/(sr*0.005)) * Math.exp(-3*i/n); // クリック防止アタック＋減衰
-        const v=Math.max(-1,Math.min(1, s*env*0.8));
-        dv.setInt16(44+i*2, v*32767, true);
-    }
-    return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
-}
-// 3種の音を起動時に1回だけ合成（Audio要素を使い回す＝再生のたびのGC/ロード回避）
-const _sndOK=new Audio(_makeToneWav(880,600));          // ピーーー（OK）
-const _sndPi=new Audio(_makeToneWav(1000,80));          // ピ（近づき）
-const _sndPo=new Audio(_makeToneWav(330,350,'triangle')); // ポーン（行き過ぎ）
-for(const a of [_sndOK,_sndPi,_sndPo]){ a.preload='auto'; a.setAttribute('playsinline',''); }
-function _playSnd(a){ try{ a.currentTime=0; a.play().catch(()=>{}); }catch(e){} }
-
-// ===== 音源モード切替 =====
-// 'webaudio': OscillatorNode常時稼働方式 / 'wav': WAV+<audio>方式（fallback）
-let _audioMode=localStorage.getItem('scanscope_audio_mode')||'webaudio';
-function _applyAudioModeBtn(){
-    $('audioModeBtn').textContent=_audioMode==='webaudio'?'音源:WebAudio':'音源:WAV';
-}
-_applyAudioModeBtn();
-$('audioModeBtn').onclick=()=>{
-    _audioMode=(_audioMode==='webaudio')?'wav':'webaudio';
-    localStorage.setItem('scanscope_audio_mode', _audioMode);
-    _applyAudioModeBtn();
-    addLog(`音源: ${_audioMode==='webaudio'?'WebAudio':'WAV'} に切替`);
-};
 
 // ===== Web Audio方式 =====
 // AudioContext・oscillator群は null で宣言し、初回アンロック時（user gesture内）に遅延生成
@@ -1772,12 +1730,8 @@ function _initWebAudio(){
 
         addLog('音源: WebAudio 初期化OK');
     }catch(e){
-        // AudioContext非対応ブラウザ→WAV方式にフォールバック
         _ac=null;
-        _audioMode='wav';
-        localStorage.setItem('scanscope_audio_mode','wav');
-        _applyAudioModeBtn();
-        addLog(`音源: WebAudio 初期化失敗→WAV方式にフォールバック (${e.message})`);
+        addLog(`音源: WebAudio 初期化失敗 (${e.message})`);
     }
 }
 
@@ -1822,22 +1776,11 @@ function _pulse(gainNode, durMs, peak=1.0){
 
 // _unlockAudio: user gesture内で呼ぶ（AudioContextのresume＋無音ループ再生→iOS消音貫通）
 function _unlockAudio(){
-    if(_audioMode==='webaudio'){
-        // Web Audioモード: AudioContext生成＋無音ループ再生でオーディオセッションをplaybackに昇格
-        _makeSilentAudio();
-        _initWebAudio();
-        if(_ac){
-            _ac.resume().catch(()=>{});
-        }
-        if(_silentAudio){
-            _silentAudio.play().catch(()=>{});
-        }
-    } else {
-        // WAVモード: 既存の再生実績作成（ピ・ポーンのアンロック）
-        for(const a of [_sndPi,_sndPo]){
-            try{ a.play().then(()=>{ a.pause(); a.currentTime=0; }).catch(()=>{}); }catch(e){}
-        }
-    }
+    // AudioContext生成＋無音ループ再生でオーディオセッションをplaybackに昇格（iOS消音貫通）
+    _makeSilentAudio();
+    _initWebAudio();
+    if(_ac) _ac.resume().catch(()=>{});
+    if(_silentAudio) _silentAudio.play().catch(()=>{});
 }
 
 // 連続音（ターゲット・逆方向）を全てOFF（5msランプ）
@@ -1849,42 +1792,30 @@ function _allContinuousOff(){
     _nearOn=false; _revOn=false;
 }
 
-// ===== ビープ関数（4状態・_audioModeで分岐）=====
+// ===== ビープ関数（4状態）=====
 // ターゲット到達: 2500Hz連続（再トリガーせず鳴らしっぱなし＝途切れない）
 function _beepTarget(){
-    if(_audioMode==='webaudio'&&_ac&&_nearGain){
-        if(_revOn){ _rampGain(_revGain,0); _revOn=false; }
-        if(!_nearOn){ _rampGain(_nearGain, 1.0); _nearOn=true; }
-    } else {
-        _playSnd(_sndOK);
-    }
+    if(!_ac||!_nearGain) return;
+    if(_revOn){ _rampGain(_revGain,0); _revOn=false; }
+    if(!_nearOn){ _rampGain(_nearGain, 1.0); _nearOn=true; }
 }
 // 接近（ゼロ→ターゲット）: 2500Hz 80msパルス
 function _beepApproach(){
-    if(_audioMode==='webaudio'&&_ac&&_nearGain){
-        if(_nearOn||_revOn) _allContinuousOff(); // 連続音から抜けた
-        _pulse(_nearGain, 80);
-    } else {
-        _playSnd(_sndPi);
-    }
+    if(!_ac||!_nearGain) return;
+    if(_nearOn||_revOn) _allContinuousOff(); // 連続音から抜けた
+    _pulse(_nearGain, 80);
 }
 // 行き過ぎ（ターゲットを通り越した）: 400Hz 150msパルス
 function _beepOver(){
-    if(_audioMode==='webaudio'&&_ac&&_overGain){
-        if(_nearOn||_revOn) _allContinuousOff();
-        _pulse(_overGain, 150);
-    } else {
-        _playSnd(_sndPo);
-    }
+    if(!_ac||!_overGain) return;
+    if(_nearOn||_revOn) _allContinuousOff();
+    _pulse(_overGain, 150);
 }
 // 逆方向（ゼロ点を反対へ越えた）: 160Hz連続ブー
 function _beepReverse(){
-    if(_audioMode==='webaudio'&&_ac&&_revGain){
-        if(_nearOn){ _rampGain(_nearGain,0); _nearOn=false; }
-        if(!_revOn){ _rampGain(_revGain, 1.0); _revOn=true; }
-    } else {
-        _playSnd(_sndPo);
-    }
+    if(!_ac||!_revGain) return;
+    if(_nearOn){ _rampGain(_nearGain,0); _nearOn=false; }
+    if(!_revOn){ _rampGain(_revGain, 1.0); _revOn=true; }
 }
 
 // 目標方向の距離(°)→パルス間隔(ms)。3°以上=1500ms（それ以上は目視で分かるので頭打ち）、
@@ -1906,7 +1837,6 @@ function _updateBeepRem(delta){
 }
 // 自走ループ: 鳴らす瞬間に最新の残量を読む（4状態: 接近/ターゲット/行き過ぎ/逆方向）
 let _beepLastKind=null;   // 直近に鳴らした音種（変化時のみログ＝スパム防止）
-const _isWA=()=>(_audioMode==='webaudio'&&_ac); // WebAudioで動作中か
 function _beepLoop(){
     _beepTimer=null;
     if(voiceTarget==null) return;
@@ -1919,10 +1849,10 @@ function _beepLoop(){
         const OK=VOICE_TOL*1.5;         // ターゲット許容 0.075°
         if(Math.abs(_beepRem)<=OK){
             // ターゲット到達: 2500Hz連続（ピーー）
-            _beepTarget(); next=_isWA()?150:620; kind='ピーー(ターゲット)';
+            _beepTarget(); next=150; kind='ピーー(ターゲット)';
         } else if(rd>tgtAbs+OK){
             // 逆方向: ゼロ点を反対へ越えた → 160Hz連続ブー
-            _beepReverse(); next=_isWA()?200:620; kind='ブーー(逆方向)';
+            _beepReverse(); next=200; kind='ブーー(逆方向)';
         } else if(rd<-OK){
             // 行き過ぎ: ターゲットを通り越した → 400Hzパルス（接近と対称・近いほど速い）
             _beepOver(); kind='ポーン(行き過ぎ)'; next=_intervalFromDist(rd);
