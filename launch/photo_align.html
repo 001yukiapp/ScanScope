@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.8.0';
+    const _V = 'pa0.9.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,13 +42,21 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.8.0 — ボスキャリブ写真化＋4輪測定Step1-3（総トー/スラストライン/個別トー/スラスト角）</div>
+    <div class="ver">pa0.9.0 — 検出px可視化＋最小pxUI化（PA4側面タグ60px割れ対策）/ ボスキャリブ写真化＋4輪測定Step1-3</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
         <input id="fxInput" type="number" value="2868" min="500" max="12000" step="1"></div>
         <div style="margin-top:6px;"><label>床タグ黒部mm</label>
         <input id="floorSizeInput" type="number" value="199.42" min="5" max="500" step="0.1"></div>
+        <div style="margin-top:6px;"><label>ボスタグ最小px（検出下限・現場で下げ可）</label>
+        <input id="minWheelPxInput" type="number" value="60" min="20" max="200" step="1"></div>
+        <div style="margin-top:6px;"><label>実車の既知値（任意・fx裏取り用 mm）</label>
+        <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">
+            <input id="wbExp" type="number" placeholder="WB" min="100" max="6000" step="1" style="width:90px;">
+            <input id="trFExp" type="number" placeholder="前トレッド" min="100" max="3000" step="1" style="width:90px;">
+            <input id="trRExp" type="number" placeholder="後トレッド" min="100" max="3000" step="1" style="width:90px;">
+        </div></div>
         <div style="margin-top:8px;">
             <button id="floorBtn" class="sec">🗺️ 床マップを写真で作成</button>
             <button id="floorResetBtn" class="sec">床リセット</button>
@@ -114,7 +122,9 @@
     function addLog(s){ log(s); }  // align4関数との互換
 
     const FLOOR_IDS = [44, 45, 46, 47];
-    const MIN_FLOOR_PX = 40, MIN_WHEEL_PX = 60;
+    const MIN_FLOOR_PX = 40;
+    let MIN_WHEEL_PX = 60;  // UI入力欄で変更可（PA4で側面55mmタグが遠距離で60px割れたとき現場で下げる）
+    function readMinWheelPx(){ const v = parseInt($('minWheelPxInput').value); MIN_WHEEL_PX = (v>=20&&v<=200)?v:60; return MIN_WHEEL_PX; }
     let imgW = 0, imgH = 0;        // 直近写真の解像度（camK用）
     let floorFrames = [];          // 床マップ用に蓄積したフレーム（写真ごと1フレーム）
     let lastPlanar = Infinity;     // 直近採用時の平面度（悪化フレーム却下の基準）
@@ -356,6 +366,7 @@
         cctx.drawImage(img, 0, 0, imgW, imgH);
 
         photoFx = parseFloat($('fxInput').value) || 2868;
+        readMinWheelPx();
         const floorSz = (parseFloat($('floorSizeInput').value)||199.42)/1000;
         detector.set_camera_info(photoFx, photoFx, imgW/2, imgH/2);
         for (let id=1; id<=16; id++) detector.set_tag_size(id, (id===1||id===9)?0.080:0.055);
@@ -396,11 +407,26 @@
         ];
         let okCount=0;
         for(const G of GRP){
-            const wheelDets = dets.filter(d => d.pose && d.id>=G.min && d.id<=G.max && tagPx(d)>=MIN_WHEEL_PX);
+            const inRange = dets.filter(d => d.pose && d.id>=G.min && d.id<=G.max);
+            const withPx = inRange.map(d=>({d, px:tagPx(d)})).sort((a,b)=>b.px-a.px);
+            const wheelDets = withPx.filter(o=>o.px>=MIN_WHEEL_PX).map(o=>o.d);
             wheelDets.forEach(d=>drawDet(d, G.g==='A'?'#00ff00':'#00bfff'));
+            // ★検出px可視化: 全ボスタグのpxと脱落理由（px不足✗ / モデル外▲）をログ
+            const pxList = withPx.map(o=>{
+                const inModel = models[G.g] && models[G.g].P[String(o.d.id)];
+                const mark = o.px<MIN_WHEEL_PX?'✗':(!inModel?'▲':'');
+                return `id${o.d.id}:${o.px.toFixed(0)}${mark}`;
+            }).join(' ');
+            const dropPx = withPx.length - wheelDets.length;
+            log(`　${SLOT_LABEL[G.slot]}(${G.g}) 範囲内${inRange.length}面→px≥${MIN_WHEEL_PX}で採用${wheelDets.length}面${dropPx?` 棄却${dropPx}`:''}: ${pxList||'なし'}`);
             const M = models[G.g];
             if(!M){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): モデル無→スキップ`); continue; }
             if(wheelDets.length===0){ log(`　${SLOT_LABEL[G.slot]}(${G.g}): ボスタグ未検出→スキップ`); continue; }
+            // px下げで4面届きそうなら現場ヒント（モデルにある面だけ数える）
+            if(wheelDets.length<4){
+                const near = withPx.filter(o=>o.px>=MIN_WHEEL_PX*0.7 && models[G.g] && models[G.g].P[String(o.d.id)]).length;
+                if(near>=4) log(`　💡 最小pxを下げれば4面届く見込み（現在✗の面のpxを確認→上の「ボスタグ最小px」を下げて同じ写真を再アップ）`);
+            }
             const est = estimateWheelPose(wheelDets, cameraPose, M);
             if(!(est && est.R && est.mode==='world')){
                 log(`　${SLOT_LABEL[G.slot]}(${G.g}): ${est? (est.err||est.mode) : 'NG'}`);
@@ -466,6 +492,16 @@
             const wb = distH(frontMid, rearMid)*1000, trF = distH(pos('FL'),pos('FR'))*1000, trR = distH(pos('RL'),pos('RR'))*1000;
             step3 = `スラスト角 = <b>${fmtToe(thrustAngle)}</b>（スラストライン vs センターライン）`
                 + `<br><span style="color:#888;font-size:12px;">参考(位置): ホイールベース${wb.toFixed(0)}mm / 前トレッド${trF.toFixed(0)}mm / 後トレッド${trR.toFixed(0)}mm</span>`;
+            // ★fx裏取り（PA6半自動）: 既知値が入っていれば誤差%と補正fx候補を表示。位置∝fxなので fx補正 = fx×既知/実測
+            const exp = { wb:parseFloat($('wbExp').value), trF:parseFloat($('trFExp').value), trR:parseFloat($('trRExp').value) };
+            const chk = [];
+            const fxSugg = [];
+            const one = (label, meas, e) => { if(e>0){ const err=(meas-e)/e*100; chk.push(`${label} 実測${meas.toFixed(0)}/既知${e.toFixed(0)}=${err>=0?'+':''}${err.toFixed(1)}%`); fxSugg.push(photoFx*e/meas); } };
+            one('WB', wb, exp.wb); one('前トレ', trF, exp.trF); one('後トレ', trR, exp.trR);
+            if(chk.length){
+                const fxMean = fxSugg.reduce((a,b)=>a+b,0)/fxSugg.length;
+                step3 += `<br><span style="color:#888;font-size:12px;">fx裏取り: ${chk.join(' / ')}<br>→ 補正fx候補 <b>${fxMean.toFixed(0)}</b>（現fx${photoFx}・誤差大なら上のfx欄に入れて再測定）</span>`;
+            }
         }
 
         if(lines.length){
@@ -498,6 +534,7 @@
         const idata=cctx.getImageData(0,0,W,H);
         const gray=new Uint8Array(W*H);
         for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
+        readMinWheelPx();
         let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
         const bd=dets.filter(d=>d.pose&&d.pose.t&&d.id>=idMin&&d.id<=idMax&&tagPx(d)>=MIN_WHEEL_PX);
         const fr={}, rr={};
@@ -506,7 +543,8 @@
             const c=[]; if(d.pose.R)c.push(d.pose.R); if(d.pose.asol&&d.pose.asol.R)c.push(d.pose.asol.R);
             rr[d.id]=c;
         }
-        return { fr, rr, n:bd.length, bd };
+        const pxs=bd.map(d=>tagPx(d));
+        return { fr, rr, n:bd.length, bd, pxs };
     }
     function updateCalibState(){
         $('calibState').textContent = calibPosFrames.length
@@ -722,11 +760,12 @@
         log(`🔧 キャリブ写真${files.length}枚を追加（ボス${g}・蓄積中${calibPosFrames.length}枚）...`);
         for(const f of files){
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
-            const { fr, rr, n }=detectBossFrame(img, idMin, idMax);
+            const { fr, rr, n, pxs }=detectBossFrame(img, idMin, idMax);
             URL.revokeObjectURL(img.src);
-            if(n<2){ log(`　ボスタグ${n}枚（2枚未満→スキップ）`); continue; }
+            if(n<2){ log(`　ボスタグ${n}枚（2枚未満→スキップ・最小px${MIN_WHEEL_PX}）`); continue; }
             calibPosFrames.push(fr); calibRotFrames.push(rr);
-            log(`　+1枚（ボスタグ${n}面）`);
+            const pxRange = pxs.length?`px${Math.min(...pxs).toFixed(0)}〜${Math.max(...pxs).toFixed(0)}`:'';
+            log(`　+1枚（ボスタグ${n}面 ${pxRange}）`);
         }
         updateCalibState(); calibInput.value='';
     };
