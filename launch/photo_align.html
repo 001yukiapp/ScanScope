@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.1';
+    const _V = 'pa0.9.2';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.1 — ボスキャリブで向き未学習の面IDを明示（支持%・候補数つき）/ pa0.9.0=検出px可視化＋最小pxUI化＋ボスキャリブ写真化＋4輪測定Step1-3</div>
+    <div class="ver">pa0.9.2 — ボスキャリブ向き学習に外向きゲート（裏flip/斜め見を分母から除外＝リング形状の汚染対策）/ pa0.9.1=向き未学習の面ID明示 / pa0.9.0=検出px可視化＋ボスキャリブ写真化＋4輪測定Step1-3</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -525,6 +525,7 @@
     // buildBodyでP構築 → R_tag_body=R_body_cam^T·R_tag_cam を全フレームから集め
     // 外向き事前重み付きpickStableRotationでQ確定（flip解は視線反射で散り負ける）。
     let calibPosFrames=[], calibRotFrames=[];
+    const CALIB_OUTWARD_MIN=0.5; // 向き学習で採用する候補の外向き度の下限(0.5≈外向き±60°以内)。裏flip/斜め見を除外
     function detectBossFrame(img, idMin, idMax){
         const W=img.naturalWidth, H=img.naturalHeight; imgW=W; imgH=H;
         canvas.width=W; canvas.height=H; cctx.drawImage(img,0,0,W,H);
@@ -578,8 +579,11 @@
                 for(const Rtc of (rr[id]||[])){
                     const Rtb=WMGeom.matMul3(RbcT,Rtc);
                     const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
+                    // 外向き(その面を正面寄りに見た正解flip)だけ採用。裏flip/斜め見は分母にも入れない
+                    // ＝リング形状で同写真の他面が斜めでも汚染されない（各面は自分が正面の写真からのみ向き学習）
+                    if(dot < CALIB_OUTWARD_MIN) continue;
                     (rotCands[id]=rotCands[id]||[]).push(Rtb);
-                    (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot));
+                    (rotWts[id]=rotWts[id]||[]).push(dot);
                 }
             }
         }
