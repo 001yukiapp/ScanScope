@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.33.4';
+    const _V = 'd0.33.5';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.33.4</p>
+    <p style="color:#555;">d0.33.5</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -127,7 +127,6 @@
             <!-- type=numberはiOSキーボードにマイナスが無く負の目標Δが入力不能 → text型 -->
             <input id="voiceTargetInput" type="text" placeholder="目標Δ° 例-0.2" style="width:88px;padding:6px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:13px;text-align:center;">
             <button id="voiceBtn" class="sec">音声ガイド</button>
-            <input id="vbiasInput" type="text" placeholder="視点補正 例-0.12" title="視点バイアス係数（横移動の偽トー補正・機種ごと校正）" style="width:96px;padding:6px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:13px;text-align:center;">
         </span>
     </div>
 
@@ -190,8 +189,8 @@ function wrap180(a){ return ((a+180)%360+360)%360-180; }
 // 視点バイアス補正（単体ボス）: ボスがカメラに対し横移動すると視線方位が変わり偽トーが出る（実測≈0.025°/mm）。
 // ゼロ点時の水平視線方位からの変化分 × VIEWBIAS_C を Δトーから差し引く。PnP位置(t)ベースなのでキングピン距離・車に依存しない。
 // VIEWBIAS_C=°bias/°azimuth（0.025°/mm×距離≈600mm換算の粗値）。★要本校正（今は横1方向のみの暫定値）。0で無効。
-// 横移動テスト3回から逆算（90mmで残差≈0）。詳細▸内の入力欄でUI調整・localStorage保存。機種ごと校正
-let VIEWBIAS_C = (()=>{ const s=localStorage.getItem('scanscope_viewbias_c'); return s!=null?parseFloat(s):-0.12; })();
+// 横移動テスト複数回から逆算（90mmで残差≈0）。固定値（UI変更不可）。機種変時はここを書き換えて再校正。
+const VIEWBIAS_C = -0.13;
 let _lastViewAz=null;   // 直近フレームのボス水平視線方位 atan2(x,z) [rad]
 let zeroViewAz=null;    // ゼロ点設定時の視線方位 [rad]
 let _lastVBias=0;       // 直近の補正量[°]（★自動確定の記録Δにも適用するため保持）
@@ -1660,10 +1659,6 @@ function applyUiMode(){
 }
 $('uiAdvBtn').onclick=()=>{ uiAdv=!uiAdv; localStorage.setItem('scanscope_ui_adv', uiAdv?'1':'0'); applyUiMode(); };
 applyUiMode();
-// 視点バイアス係数のUI（機種変・再校正用）。空欄は0扱い＝補正OFF
-(function(){ const el=$('vbiasInput'); if(!el) return; el.value=String(VIEWBIAS_C);
-    el.onchange=()=>{ const v=parseFloat(el.value); if(isNaN(v)){ el.value=String(VIEWBIAS_C); return; }
-        VIEWBIAS_C=v; localStorage.setItem('scanscope_viewbias_c',String(v)); addLog(`視点バイアス係数を ${v} に設定（横移動の偽トー補正・0で無効）`); }; })();
 
 $('loadModelBtn').onclick=armedClick($('loadModelBtn'), '⚠上書き！もう一度', ()=>{
     const s=localStorage.getItem(bakKey());
