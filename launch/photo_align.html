@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.2';
+    const _V = 'pa0.9.3';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.2 — ボスキャリブ向き学習に外向きゲート（裏flip/斜め見を分母から除外＝リング形状の汚染対策）/ pa0.9.1=向き未学習の面ID明示 / pa0.9.0=検出px可視化＋ボスキャリブ写真化＋4輪測定Step1-3</div>
+    <div class="ver">pa0.9.3 — ボスキャリブ向き受理閾値0.25→0.15（flipは外向きゲートが担うので緩めて正解を拾う）/ pa0.9.2=外向きゲート / pa0.9.1=向き未学習の面ID明示 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -592,7 +592,9 @@
             const cands=rotCands[id]||[]; candTotal+=cands.length;
             const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
             const sup=pick?pick.support:0; sups.push(sup);
-            if(!pick || pick.support<0.25){ missIds.push(`ID${id}(支持${Math.round(sup*100)}% 候補${cands.length})`); continue; }
+            // 外向きゲートでflipは除去済み→残る低supportは正解のノイズ拡散で最大クラスタは正解。
+            // 旧0.25はflip50/50割れ対策だったがゲートが担うので0.15へ緩めて正解を拾う。
+            if(!pick || pick.support<0.15){ missIds.push(`ID${id}(支持${Math.round(sup*100)}% 候補${cands.length})`); continue; }
             const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
             Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
             Qs[id]=pick.support;
