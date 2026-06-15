@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.0';
+    const _V = 'pa0.9.1';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.0 — 検出px可視化＋最小pxUI化（PA4側面タグ60px割れ対策）/ ボスキャリブ写真化＋4輪測定Step1-3</div>
+    <div class="ver">pa0.9.1 — ボスキャリブで向き未学習の面IDを明示（支持%・候補数つき）/ pa0.9.0=検出px可視化＋最小pxUI化＋ボスキャリブ写真化＋4輪測定Step1-3</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -583,12 +583,12 @@
                 }
             }
         }
-        const Q={}, Qs={}; let candTotal=0; const sups=[];
+        const Q={}, Qs={}; let candTotal=0; const sups=[]; const missIds=[];
         for(const id of pids){
             const cands=rotCands[id]||[]; candTotal+=cands.length;
             const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
-            sups.push(pick?pick.support:0);
-            if(!pick || pick.support<0.25) continue;
+            const sup=pick?pick.support:0; sups.push(sup);
+            if(!pick || pick.support<0.25){ missIds.push(`ID${id}(支持${Math.round(sup*100)}% 候補${cands.length})`); continue; }
             const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
             Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
             Qs[id]=pick.support;
@@ -599,7 +599,7 @@
         localStorage.setItem('scanscope_dodeca_model', JSON.stringify(modelObj));
         const supMax=sups.length?Math.round(Math.max(...sups)*100):0, supMin=sups.length?Math.round(Math.min(...sups)*100):0;
         log(`✅ ボス${g}モデル作成(写真): ${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
-        if(Object.keys(Q).length<placed.length) log(`　⚠ 向き未学習の面あり（PnP対象外）→ その面を正面から数枚追加すると改善`);
+        if(Object.keys(Q).length<placed.length) log(`　⚠ 向き未学習: ${missIds.join(' ')} → その面を正面・近距離から数枚追加（PnP対象外）`);
         refreshState();
     }
 
