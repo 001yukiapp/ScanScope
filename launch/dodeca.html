@@ -7,7 +7,7 @@
     <title>ScanScope ファセットボスモード</title>
     <script>
     // バージョン付きURLでキャッシュ自動無効化
-    const _V = 'd0.32.2';
+    const _V = 'd0.33.0';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -45,7 +45,7 @@
 
 <div id="start-screen">
     <h1>ScanScope ファセットボスモード</h1>
-    <p style="color:#555;">d0.32.2</p>
+    <p style="color:#555;">d0.33.0</p>
     <p>ファセットボスターゲットでトーの<b>変化量</b>を測定します。<br>
        <span style="color:#888;font-size:12px;">前後2個（ベンチ）でも、<b>単体ボス＋カメラ三脚固定</b>（実車）でも<br>ゼロ点→Δトーが使えます（単体は重力基準・要モーション許可）。</span><br><br>
        ① 「キャリブ開始」→ まず<b>真上から全面</b>を映し、<br>
@@ -186,6 +186,13 @@ function loadBaseline(){ const s=localStorage.getItem('scanscope_dodeca_baseline
 function saveBaseline(){ if(baseline==null) localStorage.removeItem('scanscope_dodeca_baseline'); else localStorage.setItem('scanscope_dodeca_baseline',String(baseline)); }
 // 角度差を[-180,180]に正規化（絶対トーが±180°境界をまたぐとΔが±360°飛ぶ事故対策）
 function wrap180(a){ return ((a+180)%360+360)%360-180; }
+// 視点バイアス補正（単体ボス）: ボスがカメラに対し横移動すると視線方位が変わり偽トーが出る（実測≈0.025°/mm）。
+// ゼロ点時の水平視線方位からの変化分 × VIEWBIAS_C を Δトーから差し引く。PnP位置(t)ベースなのでキングピン距離・車に依存しない。
+// VIEWBIAS_C=°bias/°azimuth（0.025°/mm×距離≈600mm換算の粗値）。★要本校正（今は横1方向のみの暫定値）。0で無効。
+const VIEWBIAS_C = 0.26;
+let _lastViewAz=null;   // 直近フレームのボス水平視線方位 atan2(x,z) [rad]
+let zeroViewAz=null;    // ゼロ点設定時の視線方位 [rad]
+let _lastVBias=0;       // 直近の補正量[°]（★自動確定の記録Δにも適用するため保持）
 
 function emptyModel(){ return Object.fromEntries(GROUPS.map(g=>[g.key,{P:{}}])); }
 function loadModel() {
@@ -291,7 +298,7 @@ let gravCamUp=null, _toeBasis=null;                    // カメラ系の「上�
 function applyToeBasis(basis, enterMsg){
     if(_toeBasis===basis) return;
     if(_toeBasis&&baseline!=null){
-        baseline=null; saveBaseline();
+        baseline=null; saveBaseline(); zeroViewAz=null;
         addLog(`⚠ トーの基準が${basis}基準に切り替わったためゼロ点を解除しました（再設定してください）`);
         stopVoice('基準切替のため');
     }
@@ -923,6 +930,7 @@ function fuseBody(g, list){
         dets.push(d);
     }
     if(bp.length<(cfg.min5?5:3)) return null;
+    const cpos=[0,0,0]; for(const c of cp){ cpos[0]+=c[0]; cpos[1]+=c[1]; cpos[2]+=c[2]; } for(let a=0;a<3;a++) cpos[a]/=cp.length; // カメラ系ボス中心（視点バイアス補正用）
     const sol=cfg.outlier?WMGeom.hornPoseRobust(bp, cp, ws):WMGeom.hornPose(bp, cp, ws);
     const faces=bp.length-(sol.outliers||0);
     const residual=sol.rms*1000;
@@ -1027,7 +1035,7 @@ function fuseBody(g, list){
             method=`中心 Q${qVis}/順${tags.length}${ordErrN?`(ズレ${(ordErrSum/ordErrN).toFixed(0)}px)`:''}`;
         }
     }
-    return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail, help };
+    return { R, residual, faces, total:bp.length, method, pnpRms, pnpFail, help, cpos };
 }
 
 // ===== 視点ロック（バイアス検証用）=====
@@ -1217,7 +1225,8 @@ function tryAutoConfirm(toe){
     $('s-toe-sd').textContent=`σ${sd.toFixed(2)}°`;
     if(sd<AUTO_SD_TH){
         autoLockout=now+4000;                              // 4秒ロックアウト（連続確定防止）
-        const dW=baseline!=null?wrap180(mean-baseline):null;
+        const vb=(_lastEstForRecord&&_lastEstForRecord.mode==='single')?_lastVBias:0;   // 視点バイアス補正（単体のみ）
+        const dW=baseline!=null?wrap180(mean-baseline-vb):null;
         const dStr=dW!=null?` Δ${(dW>=0?'+':'')}${dW.toFixed(2)}°`:'';
         // 表示系の自動ログ: 基準とキャンバーも刻印（パネルを見ていなくてもログだけで判断できるように）
         const d=_lastEstForRecord||{};
@@ -1345,7 +1354,10 @@ function doMeasure(groups){
                 `トー計算: 単体${g}・重力基準（固定カメラの向きが基準。カメラ/三脚を動かすと値が変わるので注意）`);
             else autoToeHist=[];                           // 単体診断（トーなし）→自動確定バッファリセット
             $('graph-wrap').style.display=gt1?'block':'none';
-            const delta=(gt1&&baseline!=null)?wrap180(gt1.toe-baseline):null;
+            // 視点バイアス補正: ゼロ点時からの視線方位変化分を引く（横移動の偽トー対策）
+            _lastViewAz = est.cpos ? Math.atan2(est.cpos[0], est.cpos[2]) : null;
+            _lastVBias = (VIEWBIAS_C && zeroViewAz!=null && _lastViewAz!=null) ? VIEWBIAS_C*(_lastViewAz-zeroViewAz)*180/Math.PI : 0;
+            const delta=(gt1&&baseline!=null)?wrap180(gt1.toe-baseline-_lastVBias):null;
             _updateBeepRem(delta);
             _lastEstForRecord={mode:'single',faces:est.faces,residual:est.residual,stability:st,viewDiff,method:est.method,pnpRms:est.pnpRms,pnpFail:est.pnpFail,dist:g==='A'?dA:dB,
                 toe:gt1?gt1.toe:null, delta, camA:gt1?gt1.camberB:null, basis:gt1?`単体${g}重力`:null};
@@ -1547,6 +1559,7 @@ function setZero(){
     const sd=Math.sqrt(recent.reduce((s,v)=>s+(v-m)**2,0)/recent.length);
     if(sd>AUTO_SD_TH){ addLog(`ゼロ点失敗: 値が安定していません（σ${sd.toFixed(2)}°）。静止して数秒待ってから`); return; }
     baseline = medOf(hist.slice(-60));
+    zeroViewAz = _lastViewAz;   // 視点バイアス補正の基準方位を固定
     saveBaseline();
     addLog(`ゼロ点設定: ${baseline.toFixed(2)}°（σ${sd.toFixed(2)}°・以後はここからのΔを表示）`);
 }
@@ -1683,7 +1696,7 @@ $('lockBtn').onclick=()=>{
     btn.textContent='ロック解除'; btn.style.background='#34d058';
     addLog(`視点ロック（安定${bodyStability(g).toFixed(2)}°）: カメラを左右に動かして視点差分を確認。1°未満なら視点バイアス消失。`);
 };
-$('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); addLog('ゼロ点を解除しました'); stopVoice('ゼロ点解除のため'); };
+$('zeroClrBtn').onclick=()=>{ baseline=null; saveBaseline(); zeroViewAz=null; addLog('ゼロ点を解除しました'); stopVoice('ゼロ点解除のため'); };
 
 // ===== ビープ音ガイド（調整モード: 車の下から画面を見ずにΔを追う）=====
 // σ安定の自動確定ごとにビープ間隔でΔ残量を伝える。
