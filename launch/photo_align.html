@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.7';
+    const _V = 'pa0.9.8';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.7 — keepP精錬でライブが持つ面を落とさない修正／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -546,6 +546,14 @@
             cr[d.id]=d.corners.map(p=>[p.x,p.y]);   // 答え合わせ(qCornerErr)用の観測コーナー
         }
         const pxs=bd.map(d=>tagPx(d));
+        // ②ID表示: 検出したボスタグに番号を重ねる（床不要・どの物理面がID○か特定用）
+        cctx.lineWidth=Math.max(2,W/500); cctx.font=`${Math.max(22,W/55)}px sans-serif`; cctx.textAlign='center'; cctx.textBaseline='middle';
+        cctx.strokeStyle='#00e5ff'; cctx.fillStyle='#00e5ff';
+        for(const d of bd){ const c=d.corners;
+            cctx.beginPath(); cctx.moveTo(c[0].x,c[0].y); for(let i=1;i<4;i++)cctx.lineTo(c[i].x,c[i].y); cctx.closePath(); cctx.stroke();
+            const cx=(c[0].x+c[1].x+c[2].x+c[3].x)/4, cy=(c[0].y+c[1].y+c[2].y+c[3].y)/4;
+            cctx.fillStyle='#000'; cctx.fillText('ID'+d.id,cx+2,cy+2); cctx.fillStyle='#00e5ff'; cctx.fillText('ID'+d.id,cx,cy); }
+        cctx.textAlign='start'; cctx.textBaseline='alphabetic';
         return { fr, rr, cr, n:bd.length, bd, pxs, W, H };
     }
     function updateCalibState(){
@@ -573,98 +581,92 @@
         for(const fr of calibPosFrames){ const fids=Object.keys(fr).filter(id=>pos[id]); if(fids.length<3)continue;
             rmss.push(WMGeom.hornPose(fids.map(id=>pos[id]),fids.map(id=>fr[id])).rms*1000); }
         rmss.sort((a,b)=>a-b); const medRms=rmss.length?rmss[Math.floor(rmss.length/2)]:0;
-        // Q学習（finishCalibrate移植）
+        // ===== 向きQ学習: 反復コーナーPnP精緻化（①各写真の姿勢をコーナーPnPで高精度化 ③姿勢⇄Qを反復＝写真BA相当）=====
         const cen=[0,0,0]; const pids=Object.keys(pos);
         for(const id of pids) for(let a=0;a<3;a++) cen[a]+=pos[id][a]/pids.length;
-        // ライブ(dodeca)方式の移植: 外向きdotはゲートせず「重み」にするだけで全候補を集め、
-        // 最後にコーナー再投影の答え合わせ(qCornerErr)でflip/バイアス解を物理的に却下する。
         const fx=parseFloat($('fxInput').value)||2868;
         const topId=(g==='A'?1:9);
-        const rotCands={}, rotWts={}; const frameCache=[];   // frameCache: {R,t,W,H,cor}
+        const hhOf=id=>(+id===topId?0.080:0.055)/2;
+        const QCORNER_MAX=30;
+        // 有効フレーム整理（各写真3面以上）
+        const frames=[];
         for(let fi=0;fi<calibPosFrames.length;fi++){
             const fr=calibPosFrames[fi], rr=calibRotFrames[fi]||{}, cr=calibCorFrames[fi]||{}, dim=calibDimFrames[fi]||{w:imgW,h:imgH};
             const fids=Object.keys(fr).filter(id=>pos[id]);
             if(fids.length<3) continue;
-            const bodyPts=fids.map(id=>pos[id]), camPts=fids.map(id=>fr[id]);
-            const bodySol=WMGeom.hornPose(bodyPts, camPts);
-            const RbcT=WMGeom.matT3(bodySol.R);
-            // hornPoseはRのみ返すので並進t=cbar−R·pbarを別途算出（body→cam: C=R·P+t）
-            const pbar=[0,0,0], cbar=[0,0,0];
-            for(let i=0;i<bodyPts.length;i++) for(let a=0;a<3;a++){ pbar[a]+=bodyPts[i][a]/bodyPts.length; cbar[a]+=camPts[i][a]/camPts.length; }
-            const Rp=WMGeom.matVec3(bodySol.R,pbar);
-            const tBody=[cbar[0]-Rp[0], cbar[1]-Rp[1], cbar[2]-Rp[2]];
-            frameCache.push({R:bodySol.R, t:tBody, W:dim.w, H:dim.h, cor:cr});
-            for(const id of fids){
-                const out=[pos[id][0]-cen[0], pos[id][1]-cen[1], pos[id][2]-cen[2]];
-                const on=Math.hypot(out[0],out[1],out[2])||1;
-                for(const Rtc of (rr[id]||[])){
-                    const Rtb=WMGeom.matMul3(RbcT,Rtc);
-                    const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
-                    (rotCands[id]=rotCands[id]||[]).push(Rtb);
-                    (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot));   // ゲートせず重みのみ（ライブ同様）
-                }
-            }
+            frames.push({fids, fr, rr, cr, K:{fx,fy:fx,cx:dim.w/2,cy:dim.h/2}});
         }
-        // 候補Qのコーナー再投影誤差中央値(px)。観測コーナーが正解データなのでflip/バイアス解は
-        // 必ず大きく外れる＝視点に依存しない真偽判定。上面・裏面も巻き添えにならない（dodeca qPredErr移植）
-        function qCornerErr(id, Qc){
-            const hh=(+id===topId?0.080:0.055)/2;
-            const errs=[];
-            for(const fc of frameCache){
-                const obs=fc.cor[id]; if(!obs) continue;
-                const K={fx, fy:fx, cx:fc.W/2, cy:fc.H/2};
-                const pred=TAG_LOCAL(hh).map(l=>{
-                    const v=WMGeom.matVec3(Qc,l);
-                    const Y=WMGeom.matVec3(fc.R,[pos[id][0]+v[0],pos[id][1]+v[1],pos[id][2]+v[2]]);
-                    const p=WMGeom.projectK(K,[Y[0]+fc.t[0],Y[1]+fc.t[1],Y[2]+fc.t[2]]);
-                    return [p.u,p.v];
-                });
-                let be=Infinity;                                  // コーナー順(回転4×反転2)の最良一致
-                for(let rev=0;rev<2;rev++){ const o=rev?[...obs].reverse():obs;
-                    for(let s=0;s<4;s++){ let e=0; for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); } if(e<be) be=e; }
-                }
-                errs.push(be/4);
+        if(!frames.length){ log('❌ 向き学習: 有効フレーム無し（各写真3面以上必要）'); refreshState(); return; }
+        // 予測コーナー(Q,姿勢から) / 観測コーナーの最良対応(回転4×反転2)
+        const predCorners=(id,Qc,R,t,K)=>TAG_LOCAL(hhOf(id)).map(l=>{
+            const v=WMGeom.matVec3(Qc,l);
+            const Y=WMGeom.matVec3(R,[pos[id][0]+v[0],pos[id][1]+v[1],pos[id][2]+v[2]]);
+            const p=WMGeom.projectK(K,[Y[0]+t[0],Y[1]+t[1],Y[2]+t[2]]); return [p.u,p.v];
+        });
+        const orderObs=(pred,obs)=>{ let best=null;
+            for(let rev=0;rev<2;rev++){ const o=rev?[...obs].reverse():obs;
+                for(let s=0;s<4;s++){ let e=0; const arr=[]; for(let k=0;k<4;k++){ const p=o[(k+s)%4]; arr.push(p); e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); } if(!best||e<best.e) best={e:e/4,arr}; } }
+            return best; };
+        // ①フレーム姿勢: 中心Horn初期化→Qを持つ面のコーナーでpnpRefine（中心Hornより回転が締まる）
+        const framePose=(f,Qmap)=>{
+            const bodyPts=f.fids.map(id=>pos[id]), camPts=f.fids.map(id=>f.fr[id]);
+            const R0=WMGeom.hornPose(bodyPts,camPts).R;
+            const pbar=[0,0,0],cbar=[0,0,0];
+            for(let i=0;i<bodyPts.length;i++)for(let a=0;a<3;a++){pbar[a]+=bodyPts[i][a]/bodyPts.length; cbar[a]+=camPts[i][a]/camPts.length;}
+            const Rp=WMGeom.matVec3(R0,pbar); const t0=[cbar[0]-Rp[0],cbar[1]-Rp[1],cbar[2]-Rp[2]];
+            const X=[],uv=[];
+            for(const id of f.fids){ const q=Qmap[id]; if(!q||!f.cr[id]) continue;
+                const ord=orderObs(predCorners(id,q,R0,t0,f.K), f.cr[id]);
+                if(ord && ord.e<60){ const hh=hhOf(id);
+                    const Xc=TAG_LOCAL(hh).map(l=>{const v=WMGeom.matVec3(q,l); return [pos[id][0]+v[0],pos[id][1]+v[1],pos[id][2]+v[2]];});
+                    for(let k=0;k<4;k++){ X.push(Xc[k]); uv.push(ord.arr[k]); } }
             }
-            if(!errs.length) return null;
-            errs.sort((a,b)=>a-b); return errs[Math.floor(errs.length/2)];
+            if(X.length>=8){ const ref=WMGeom.pnpRefine(X,uv,f.K,R0,t0,10); if(ref && isFinite(ref.rmsPx)) return {R:ref.R,t:ref.t}; }
+            return {R:R0,t:t0};
+        };
+        // 与えた姿勢でのコーナー誤差中央値(px)
+        const qErr=(id,Qc,poses)=>{ const errs=[];
+            for(let i=0;i<frames.length;i++){ const obs=frames[i].cr[id]; if(!obs) continue;
+                const ord=orderObs(predCorners(id,Qc,poses[i].R,poses[i].t,frames[i].K), obs); errs.push(ord.e); }
+            if(!errs.length) return null; errs.sort((a,b)=>a-b); return errs[Math.floor(errs.length/2)]; };
+        // ③反復: 姿勢→候補Rtb→コーナー駆動でQ選択→姿勢… を数回（写真バンドル調整相当）
+        let Qcur={...baseQ}; let poses=frames.map(f=>framePose(f,Qcur));
+        let result={}; let candTotal=0;
+        for(let iter=0;iter<3;iter++){
+            const rotCands={}, rotWts={};
+            for(let i=0;i<frames.length;i++){ const f=frames[i]; const RbcT=WMGeom.matT3(poses[i].R);
+                for(const id of f.fids){ const out=[pos[id][0]-cen[0],pos[id][1]-cen[1],pos[id][2]-cen[2]]; const on=Math.hypot(out[0],out[1],out[2])||1;
+                    for(const Rtc of (f.rr[id]||[])){ const Rtb=WMGeom.matMul3(RbcT,Rtc); const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
+                        (rotCands[id]=rotCands[id]||[]).push(Rtb); (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot)); } } }
+            result={};
+            const allIds=new Set([...pids, ...Object.keys(baseQ)]);
+            for(const id of allIds){ if(!pos[id]) continue;
+                const cands=rotCands[id]||[]; if(iter===0) candTotal+=cands.length;
+                const opts=[];   // {Q,err,supp,src}
+                if(cands.length){ let bi=-1,be=Infinity; for(let j=0;j<cands.length;j++){const e=qErr(id,cands[j],poses); if(e!=null&&e<be){be=e;bi=j;}}
+                    if(bi>=0){ const near=cands.filter(R=>WMGeom.rotAngleDeg(cands[bi],R)<10); const Qavg=near.length>=5?WMGeom.avgRotGS(near):cands[bi]; const eA=qErr(id,Qavg,poses); const useA=(eA!=null&&eA<=be*1.2); opts.push({Q:useA?Qavg:cands[bi],err:useA?eA:be,supp:Math.max(0.3,near.length/cands.length),src:'写真'}); }
+                    else { const pick=WMGeom.pickStableRotation(cands,25,rotWts[id]); if(pick&&pick.support>=0.15) opts.push({Q:pick.R,err:null,supp:pick.support,src:'写真'}); }
+                }
+                if(Qcur[id]){ opts.push({Q:Qcur[id],err:qErr(id,Qcur[id],poses),supp:0.4,src:'現'}); }
+                if(baseQ[id]){ opts.push({Q:baseQ[id],err:qErr(id,baseQ[id],poses),supp:baseQs[id]!=null?baseQs[id]:0.5,src:'ライブ'}); }
+                if(!opts.length) continue;
+                opts.sort((a,b)=>(a.err==null?1e9:a.err)-(b.err==null?1e9:b.err));
+                result[id]=opts[0];
+            }
+            Qcur={}; for(const id in result) Qcur[id]=result[id].Q;   // 次反復の姿勢の足場（errは問わない）
+            poses=frames.map(f=>framePose(f,Qcur));
         }
-        const QCORNER_MAX=30;                                     // px。正解は数〜十数px・bad解は数百px
-        const Q={}, Qs={}, Qe={}; let candTotal=0; const missIds=[]; let keptLive=0;
-        const allIds=new Set([...pids, ...Object.keys(baseQ)]);   // 写真に出なかった面もbaseQがあれば対象
-        for(const id of allIds){
-            if(!pos[id]) continue;
-            const cands=rotCands[id]||[]; candTotal+=cands.length;
-            const options=[];                                     // {Q, err, src, supp} 候補を集めてコーナー誤差最小を採る
-            // ① 写真からのコーナー駆動候補
-            if(cands.length){
-                let bi=-1, be=Infinity;
-                for(let i=0;i<cands.length;i++){ const e=qCornerErr(id, cands[i]); if(e!=null && e<be){ be=e; bi=i; } }
-                if(bi>=0){
-                    const near=cands.filter(R=>WMGeom.rotAngleDeg(cands[bi],R)<10);
-                    const Qavg=near.length>=5 ? WMGeom.avgRotGS(near) : cands[bi];
-                    const eAvg=qCornerErr(id, Qavg);
-                    const useAvg=(eAvg!=null && eAvg<=be*1.2);
-                    options.push({Q:useAvg?Qavg:cands[bi], err:useAvg?eAvg:be, src:'写真', supp:Math.max(0.3, near.length/cands.length)});
-                } else { // コーナー観測無→多数決フォールバック
-                    const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
-                    if(pick && pick.support>=0.15) options.push({Q:pick.R, err:null, src:'写真', supp:pick.support});
-                }
-            }
-            // ② ライブQ(baseQ)を同じ写真フレームで評価した候補（keepP時）
-            if(baseQ[id]){ const eB=qCornerErr(id, baseQ[id]); options.push({Q:baseQ[id], err:eB, src:'ライブ', supp:baseQs[id]!=null?baseQs[id]:0.5}); }
-            if(!options.length){ missIds.push(`ID${id}(候補0)`); continue; }
-            // ★keep-best: コーナー誤差が一番小さい向きを採る（err=nullは最後回し＝写真とライブの良い方を残す＝悪化させない）
-            options.sort((a,b)=>(a.err==null?1e9:a.err)-(b.err==null?1e9:b.err));
-            const best=options[0];
-            if(best.err!=null && best.err>QCORNER_MAX){
-                // keepP: ライブが持っていた面は絶対に落とさない（写真が改善できなかっただけ＝モデルを劣化させない）
+        // 最終採否: QCORNER_MAXゲート＋keep-best（ライブが持つ面は落とさない＝悪化させない）
+        const Q={}, Qs={}, Qe={}; const missIds=[]; let keptLive=0;
+        for(const id of Object.keys(result)){ const o=result[id];
+            if(o.err!=null && o.err>QCORNER_MAX){
                 if(baseQ[id]){ Q[id]=baseQ[id]; Qs[id]=+(baseQs[id]!=null?baseQs[id]:0.5).toFixed(2); Qe[id]=null; keptLive++; }
-                else missIds.push(`ID${id}(最小コーナー誤差${best.err.toFixed(0)}px>${QCORNER_MAX}・正面写真が必要)`);
+                else missIds.push(`ID${id}(${o.err.toFixed(0)}px>${QCORNER_MAX}・正面写真が必要)`);
                 continue;
             }
-            Q[id]=best.Q; Qs[id]=+best.supp.toFixed(2); Qe[id]=best.err;   // bodyQs<0.25ゲート通過のためsuppは0.3以上保証済み
-            if(best.src==='ライブ') keptLive++;
+            Q[id]=o.Q; Qs[id]=+o.supp.toFixed(2); Qe[id]=(o.err!=null?+o.err.toFixed(1):null); if(o.src==='ライブ') keptLive++;
         }
+        for(const id of Object.keys(baseQ)){ if(!Q[id]){ Q[id]=baseQ[id]; Qs[id]=+(baseQs[id]!=null?baseQs[id]:0.5).toFixed(2); Qe[id]=null; keptLive++; } }
         // 保存（dodecaと共有 scanscope_dodeca_model）
         let modelObj={}; try{ modelObj=JSON.parse(localStorage.getItem('scanscope_dodeca_model')||'{}'); }catch(e){}
         modelObj[g]={ P:pos, Q, Qs, meta:{ rms:+medRms.toFixed(1), at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}), src:keepP?'photoQ+liveP':'photo' } };
