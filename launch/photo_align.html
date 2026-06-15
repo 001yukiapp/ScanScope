@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.6';
+    const _V = 'pa0.9.7';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.6 — 「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.9.7 — keepP精錬でライブが持つ面を落とさない修正／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -656,7 +656,12 @@
             // ★keep-best: コーナー誤差が一番小さい向きを採る（err=nullは最後回し＝写真とライブの良い方を残す＝悪化させない）
             options.sort((a,b)=>(a.err==null?1e9:a.err)-(b.err==null?1e9:b.err));
             const best=options[0];
-            if(best.err!=null && best.err>QCORNER_MAX){ missIds.push(`ID${id}(最小コーナー誤差${best.err.toFixed(0)}px>${QCORNER_MAX})`); continue; }
+            if(best.err!=null && best.err>QCORNER_MAX){
+                // keepP: ライブが持っていた面は絶対に落とさない（写真が改善できなかっただけ＝モデルを劣化させない）
+                if(baseQ[id]){ Q[id]=baseQ[id]; Qs[id]=+(baseQs[id]!=null?baseQs[id]:0.5).toFixed(2); Qe[id]=null; keptLive++; }
+                else missIds.push(`ID${id}(最小コーナー誤差${best.err.toFixed(0)}px>${QCORNER_MAX}・正面写真が必要)`);
+                continue;
+            }
             Q[id]=best.Q; Qs[id]=+best.supp.toFixed(2); Qe[id]=best.err;   // bodyQs<0.25ゲート通過のためsuppは0.3以上保証済み
             if(best.src==='ライブ') keptLive++;
         }
