@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.4';
+    const _V = 'pa0.9.5';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.4 — ボスキャリブ向き学習をライブ方式へ（外向きはゲートせず重みのみ＋コーナー再投影の答え合わせでflip却下＝上面/裏面も巻き添えなし）/ pa0.9.1=向き未学習の面ID明示 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.9.5 — ボスキャリブ向きを「コーナーに選ばせる」方式へ（回転多数決でなく各候補のコーナー再投影誤差最小を採用＝視点バイアス解の罠を回避）/ pa0.9.4=コーナー答え合わせ追加 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -618,18 +618,30 @@
             if(!errs.length) return null;
             errs.sort((a,b)=>a-b); return errs[Math.floor(errs.length/2)];
         }
-        const QCORNER_MAX=40;                                     // px。正解は数〜十数px・flip解は数百px
+        const QCORNER_MAX=30;                                     // px。正解は数〜十数px・bad解は数百px
         const Q={}, Qs={}, Qe={}; let candTotal=0; const missIds=[];
         for(const id of pids){
             const cands=rotCands[id]||[]; candTotal+=cands.length;
-            const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
-            if(!pick){ missIds.push(`ID${id}(候補0)`); continue; }
-            const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
-            const Qc=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
-            const cerr=qCornerErr(id, Qc);
-            if(cerr!=null && cerr>QCORNER_MAX){ missIds.push(`ID${id}(コーナー誤差${cerr.toFixed(0)}px>${QCORNER_MAX} 支持${Math.round(pick.support*100)}%)`); continue; }
-            if(cerr==null && pick.support<0.15){ missIds.push(`ID${id}(コーナー無・支持${Math.round(pick.support*100)}%)`); continue; }
-            Q[id]=Qc; Qs[id]=+pick.support.toFixed(2); Qe[id]=cerr;
+            if(!cands.length){ missIds.push(`ID${id}(候補0)`); continue; }
+            // ★コーナーに選ばせる（ライブ=コーナーが審判）: 回転多数決ではなく、各候補を
+            // コーナー再投影誤差で評価して最小の向きを採る。正面ショット由来の良候補が勝つ
+            let bi=-1, be=Infinity;
+            for(let i=0;i<cands.length;i++){ const e=qCornerErr(id, cands[i]); if(e!=null && e<be){ be=e; bi=i; } }
+            if(bi<0){ // コーナー観測が無い面のみ回転多数決にフォールバック
+                const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
+                if(pick && pick.support>=0.15){ Q[id]=pick.R; Qs[id]=+pick.support.toFixed(2); Qe[id]=null; }
+                else missIds.push(`ID${id}(コーナー無・支持${Math.round((pick?pick.support:0)*100)}%)`);
+                continue;
+            }
+            // 最小誤差候補の近傍だけ平均して安定化（平均で悪化したら単体採用）
+            const near=cands.filter(R=>WMGeom.rotAngleDeg(cands[bi],R)<10);
+            const Qavg=near.length>=5 ? WMGeom.avgRotGS(near) : cands[bi];
+            const eAvg=qCornerErr(id, Qavg);
+            const useAvg=(eAvg!=null && eAvg<=be*1.2);
+            const Qfinal=useAvg?Qavg:cands[bi], useErr=useAvg?eAvg:be;
+            if(useErr>QCORNER_MAX){ missIds.push(`ID${id}(最小コーナー誤差${useErr.toFixed(0)}px>${QCORNER_MAX} 候補${cands.length})`); continue; }
+            // measurementのbodyQs<0.25ゲートを通すため、コーナー検証済みは0.3以上を保証
+            Q[id]=Qfinal; Qs[id]=+Math.max(0.3, near.length/cands.length).toFixed(2); Qe[id]=useErr;
         }
         // 保存（dodecaと共有 scanscope_dodeca_model）
         let modelObj={}; try{ modelObj=JSON.parse(localStorage.getItem('scanscope_dodeca_model')||'{}'); }catch(e){}
