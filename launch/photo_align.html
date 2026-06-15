@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.5';
+    const _V = 'pa0.9.6';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.5 — ボスキャリブ向きを「コーナーに選ばせる」方式へ（回転多数決でなく各候補のコーナー再投影誤差最小を採用＝視点バイアス解の罠を回避）/ pa0.9.4=コーナー答え合わせ追加 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.9.6 — 「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -82,6 +82,7 @@
             <button id="calibRunBtn" class="sec">モデルを作る</button>
             <button id="calibResetBtn" class="sec">蓄積リセット</button>
         </div>
+        <label style="display:block;margin-top:6px;font-size:13px;color:#bbb;"><input type="checkbox" id="calibKeepP"> 位置(P)はライブ流用・向きQだけ写真で精錬（keep-best＝悪化させない）</label>
         <div id="calibState" style="color:#888;font-size:12px;margin-top:8px;">未蓄積</div>
     </div>
 
@@ -555,9 +556,18 @@
     function runBossCalib(){
         const g=$('calibTargetSelect').value;
         if(calibPosFrames.length<3){ log(`キャリブには3枚以上必要（現在${calibPosFrames.length}枚）`); return; }
-        const idset=new Set(); calibPosFrames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
-        const { pos, placed, failed }=WMGeom.buildBody([...idset], calibPosFrames);
-        if(placed.length<3){ log(`❌ 構築失敗: 配置${placed.length}面（視点の多様性不足）`); return; }
+        const keepP = $('calibKeepP') && $('calibKeepP').checked;
+        const existing = loadGroupModel(g);
+        let pos, placed, failed=[], baseQ={}, baseQs={};
+        if(keepP){
+            if(!existing || !existing.P){ log(`❌ 位置流用ON だがライブモデル(P)が無い→先にdodecaでキャリブ＆モデル保存を`); return; }
+            pos = existing.P; placed = Object.keys(pos); baseQ = existing.Q||{}; baseQs = existing.Qs||{};
+            log(`📐 位置(P)=ライブモデル流用 ${placed.length}面・向きQだけ写真で精錬（写真とライブをコーナー誤差で比較しkeep-best）`);
+        } else {
+            const idset=new Set(); calibPosFrames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
+            ({ pos, placed, failed }=WMGeom.buildBody([...idset], calibPosFrames));
+            if(placed.length<3){ log(`❌ 構築失敗: 配置${placed.length}面（視点の多様性不足）`); return; }
+        }
         // 残差中央（各フレームをモデルに当てたHorn残差）
         const rmss=[];
         for(const fr of calibPosFrames){ const fids=Object.keys(fr).filter(id=>pos[id]); if(fids.length<3)continue;
@@ -619,38 +629,45 @@
             errs.sort((a,b)=>a-b); return errs[Math.floor(errs.length/2)];
         }
         const QCORNER_MAX=30;                                     // px。正解は数〜十数px・bad解は数百px
-        const Q={}, Qs={}, Qe={}; let candTotal=0; const missIds=[];
-        for(const id of pids){
+        const Q={}, Qs={}, Qe={}; let candTotal=0; const missIds=[]; let keptLive=0;
+        const allIds=new Set([...pids, ...Object.keys(baseQ)]);   // 写真に出なかった面もbaseQがあれば対象
+        for(const id of allIds){
+            if(!pos[id]) continue;
             const cands=rotCands[id]||[]; candTotal+=cands.length;
-            if(!cands.length){ missIds.push(`ID${id}(候補0)`); continue; }
-            // ★コーナーに選ばせる（ライブ=コーナーが審判）: 回転多数決ではなく、各候補を
-            // コーナー再投影誤差で評価して最小の向きを採る。正面ショット由来の良候補が勝つ
-            let bi=-1, be=Infinity;
-            for(let i=0;i<cands.length;i++){ const e=qCornerErr(id, cands[i]); if(e!=null && e<be){ be=e; bi=i; } }
-            if(bi<0){ // コーナー観測が無い面のみ回転多数決にフォールバック
-                const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
-                if(pick && pick.support>=0.15){ Q[id]=pick.R; Qs[id]=+pick.support.toFixed(2); Qe[id]=null; }
-                else missIds.push(`ID${id}(コーナー無・支持${Math.round((pick?pick.support:0)*100)}%)`);
-                continue;
+            const options=[];                                     // {Q, err, src, supp} 候補を集めてコーナー誤差最小を採る
+            // ① 写真からのコーナー駆動候補
+            if(cands.length){
+                let bi=-1, be=Infinity;
+                for(let i=0;i<cands.length;i++){ const e=qCornerErr(id, cands[i]); if(e!=null && e<be){ be=e; bi=i; } }
+                if(bi>=0){
+                    const near=cands.filter(R=>WMGeom.rotAngleDeg(cands[bi],R)<10);
+                    const Qavg=near.length>=5 ? WMGeom.avgRotGS(near) : cands[bi];
+                    const eAvg=qCornerErr(id, Qavg);
+                    const useAvg=(eAvg!=null && eAvg<=be*1.2);
+                    options.push({Q:useAvg?Qavg:cands[bi], err:useAvg?eAvg:be, src:'写真', supp:Math.max(0.3, near.length/cands.length)});
+                } else { // コーナー観測無→多数決フォールバック
+                    const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
+                    if(pick && pick.support>=0.15) options.push({Q:pick.R, err:null, src:'写真', supp:pick.support});
+                }
             }
-            // 最小誤差候補の近傍だけ平均して安定化（平均で悪化したら単体採用）
-            const near=cands.filter(R=>WMGeom.rotAngleDeg(cands[bi],R)<10);
-            const Qavg=near.length>=5 ? WMGeom.avgRotGS(near) : cands[bi];
-            const eAvg=qCornerErr(id, Qavg);
-            const useAvg=(eAvg!=null && eAvg<=be*1.2);
-            const Qfinal=useAvg?Qavg:cands[bi], useErr=useAvg?eAvg:be;
-            if(useErr>QCORNER_MAX){ missIds.push(`ID${id}(最小コーナー誤差${useErr.toFixed(0)}px>${QCORNER_MAX} 候補${cands.length})`); continue; }
-            // measurementのbodyQs<0.25ゲートを通すため、コーナー検証済みは0.3以上を保証
-            Q[id]=Qfinal; Qs[id]=+Math.max(0.3, near.length/cands.length).toFixed(2); Qe[id]=useErr;
+            // ② ライブQ(baseQ)を同じ写真フレームで評価した候補（keepP時）
+            if(baseQ[id]){ const eB=qCornerErr(id, baseQ[id]); options.push({Q:baseQ[id], err:eB, src:'ライブ', supp:baseQs[id]!=null?baseQs[id]:0.5}); }
+            if(!options.length){ missIds.push(`ID${id}(候補0)`); continue; }
+            // ★keep-best: コーナー誤差が一番小さい向きを採る（err=nullは最後回し＝写真とライブの良い方を残す＝悪化させない）
+            options.sort((a,b)=>(a.err==null?1e9:a.err)-(b.err==null?1e9:b.err));
+            const best=options[0];
+            if(best.err!=null && best.err>QCORNER_MAX){ missIds.push(`ID${id}(最小コーナー誤差${best.err.toFixed(0)}px>${QCORNER_MAX})`); continue; }
+            Q[id]=best.Q; Qs[id]=+best.supp.toFixed(2); Qe[id]=best.err;   // bodyQs<0.25ゲート通過のためsuppは0.3以上保証済み
+            if(best.src==='ライブ') keptLive++;
         }
         // 保存（dodecaと共有 scanscope_dodeca_model）
         let modelObj={}; try{ modelObj=JSON.parse(localStorage.getItem('scanscope_dodeca_model')||'{}'); }catch(e){}
-        modelObj[g]={ P:pos, Q, Qs, meta:{ rms:+medRms.toFixed(1), at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}), src:'photo' } };
+        modelObj[g]={ P:pos, Q, Qs, meta:{ rms:+medRms.toFixed(1), at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}), src:keepP?'photoQ+liveP':'photo' } };
         localStorage.setItem('scanscope_dodeca_model', JSON.stringify(modelObj));
-        const svals=Object.values(Qs), evals=Object.values(Qe).filter(e=>e!=null);
-        const supMax=svals.length?Math.round(Math.max(...svals)*100):0, supMin=svals.length?Math.round(Math.min(...svals)*100):0;
+        const evals=Object.values(Qe).filter(e=>e!=null);
         const errTxt=evals.length?` コーナー誤差${Math.min(...evals).toFixed(0)}〜${Math.max(...evals).toFixed(0)}px`:'';
-        log(`✅ ボス${g}モデル作成(写真): ${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}%${errTxt} 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
+        const ptxt=keepP?`位置=ライブ流用 ${placed.length}面`:`${placed.length}面 残差中央${medRms.toFixed(1)}mm`;
+        log(`✅ ボス${g}モデル${keepP?'(向き精錬)':'作成(写真)'}: ${ptxt} 向き${Object.keys(Q).length}面${errTxt}${keptLive?` ライブ保持${keptLive}面`:''} 候補${candTotal}${failed.length?` 欠${failed.length}`:''}`);
         if(Object.keys(Q).length<placed.length) log(`　⚠ 向き未学習: ${missIds.join(' ')} → その面を正面・近距離から数枚追加（PnP対象外）`);
         refreshState();
     }
