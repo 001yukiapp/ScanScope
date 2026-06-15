@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <title>ScanScope 写真アライメント（Step1）</title>
     <script>
-    const _V = 'pa0.9.3';
+    const _V = 'pa0.9.4';
     if (!location.search.includes(_V)) location.replace(location.pathname + '?v=' + _V);
     </script>
     <style>
@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.3 — ボスキャリブ向き受理閾値0.25→0.15（flipは外向きゲートが担うので緩めて正解を拾う）/ pa0.9.2=外向きゲート / pa0.9.1=向き未学習の面ID明示 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.9.4 — ボスキャリブ向き学習をライブ方式へ（外向きはゲートせず重みのみ＋コーナー再投影の答え合わせでflip却下＝上面/裏面も巻き添えなし）/ pa0.9.1=向き未学習の面ID明示 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -524,8 +524,7 @@
     // 各写真=1フレーム。pos{id:t}・rot{id:[R候補(pose.R + asol.R)]}を蓄積し、
     // buildBodyでP構築 → R_tag_body=R_body_cam^T·R_tag_cam を全フレームから集め
     // 外向き事前重み付きpickStableRotationでQ確定（flip解は視線反射で散り負ける）。
-    let calibPosFrames=[], calibRotFrames=[];
-    const CALIB_OUTWARD_MIN=0.5; // 向き学習で採用する候補の外向き度の下限(0.5≈外向き±60°以内)。裏flip/斜め見を除外
+    let calibPosFrames=[], calibRotFrames=[], calibCorFrames=[], calibDimFrames=[];
     function detectBossFrame(img, idMin, idMax){
         const W=img.naturalWidth, H=img.naturalHeight; imgW=W; imgH=H;
         canvas.width=W; canvas.height=H; cctx.drawImage(img,0,0,W,H);
@@ -538,14 +537,15 @@
         readMinWheelPx();
         let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
         const bd=dets.filter(d=>d.pose&&d.pose.t&&d.id>=idMin&&d.id<=idMax&&tagPx(d)>=MIN_WHEEL_PX);
-        const fr={}, rr={};
+        const fr={}, rr={}, cr={};
         for(const d of bd){
             fr[d.id]=d.pose.t;
             const c=[]; if(d.pose.R)c.push(d.pose.R); if(d.pose.asol&&d.pose.asol.R)c.push(d.pose.asol.R);
             rr[d.id]=c;
+            cr[d.id]=d.corners.map(p=>[p.x,p.y]);   // 答え合わせ(qCornerErr)用の観測コーナー
         }
         const pxs=bd.map(d=>tagPx(d));
-        return { fr, rr, n:bd.length, bd, pxs };
+        return { fr, rr, cr, n:bd.length, bd, pxs, W, H };
     }
     function updateCalibState(){
         $('calibState').textContent = calibPosFrames.length
@@ -566,45 +566,79 @@
         // Q学習（finishCalibrate移植）
         const cen=[0,0,0]; const pids=Object.keys(pos);
         for(const id of pids) for(let a=0;a<3;a++) cen[a]+=pos[id][a]/pids.length;
-        const rotCands={}, rotWts={};
+        // ライブ(dodeca)方式の移植: 外向きdotはゲートせず「重み」にするだけで全候補を集め、
+        // 最後にコーナー再投影の答え合わせ(qCornerErr)でflip/バイアス解を物理的に却下する。
+        const fx=parseFloat($('fxInput').value)||2868;
+        const topId=(g==='A'?1:9);
+        const rotCands={}, rotWts={}; const frameCache=[];   // frameCache: {R,t,W,H,cor}
         for(let fi=0;fi<calibPosFrames.length;fi++){
-            const fr=calibPosFrames[fi], rr=calibRotFrames[fi]||{};
+            const fr=calibPosFrames[fi], rr=calibRotFrames[fi]||{}, cr=calibCorFrames[fi]||{}, dim=calibDimFrames[fi]||{w:imgW,h:imgH};
             const fids=Object.keys(fr).filter(id=>pos[id]);
             if(fids.length<3) continue;
-            const bodySol=WMGeom.hornPose(fids.map(id=>pos[id]), fids.map(id=>fr[id]));
+            const bodyPts=fids.map(id=>pos[id]), camPts=fids.map(id=>fr[id]);
+            const bodySol=WMGeom.hornPose(bodyPts, camPts);
             const RbcT=WMGeom.matT3(bodySol.R);
+            // hornPoseはRのみ返すので並進t=cbar−R·pbarを別途算出（body→cam: C=R·P+t）
+            const pbar=[0,0,0], cbar=[0,0,0];
+            for(let i=0;i<bodyPts.length;i++) for(let a=0;a<3;a++){ pbar[a]+=bodyPts[i][a]/bodyPts.length; cbar[a]+=camPts[i][a]/camPts.length; }
+            const Rp=WMGeom.matVec3(bodySol.R,pbar);
+            const tBody=[cbar[0]-Rp[0], cbar[1]-Rp[1], cbar[2]-Rp[2]];
+            frameCache.push({R:bodySol.R, t:tBody, W:dim.w, H:dim.h, cor:cr});
             for(const id of fids){
                 const out=[pos[id][0]-cen[0], pos[id][1]-cen[1], pos[id][2]-cen[2]];
                 const on=Math.hypot(out[0],out[1],out[2])||1;
                 for(const Rtc of (rr[id]||[])){
                     const Rtb=WMGeom.matMul3(RbcT,Rtc);
                     const dot=(Rtb[0][2]*out[0]+Rtb[1][2]*out[1]+Rtb[2][2]*out[2])/on;
-                    // 外向き(その面を正面寄りに見た正解flip)だけ採用。裏flip/斜め見は分母にも入れない
-                    // ＝リング形状で同写真の他面が斜めでも汚染されない（各面は自分が正面の写真からのみ向き学習）
-                    if(dot < CALIB_OUTWARD_MIN) continue;
                     (rotCands[id]=rotCands[id]||[]).push(Rtb);
-                    (rotWts[id]=rotWts[id]||[]).push(dot);
+                    (rotWts[id]=rotWts[id]||[]).push(Math.max(0.05,dot));   // ゲートせず重みのみ（ライブ同様）
                 }
             }
         }
-        const Q={}, Qs={}; let candTotal=0; const sups=[]; const missIds=[];
+        // 候補Qのコーナー再投影誤差中央値(px)。観測コーナーが正解データなのでflip/バイアス解は
+        // 必ず大きく外れる＝視点に依存しない真偽判定。上面・裏面も巻き添えにならない（dodeca qPredErr移植）
+        function qCornerErr(id, Qc){
+            const hh=(+id===topId?0.080:0.055)/2;
+            const errs=[];
+            for(const fc of frameCache){
+                const obs=fc.cor[id]; if(!obs) continue;
+                const K={fx, fy:fx, cx:fc.W/2, cy:fc.H/2};
+                const pred=TAG_LOCAL(hh).map(l=>{
+                    const v=WMGeom.matVec3(Qc,l);
+                    const Y=WMGeom.matVec3(fc.R,[pos[id][0]+v[0],pos[id][1]+v[1],pos[id][2]+v[2]]);
+                    const p=WMGeom.projectK(K,[Y[0]+fc.t[0],Y[1]+fc.t[1],Y[2]+fc.t[2]]);
+                    return [p.u,p.v];
+                });
+                let be=Infinity;                                  // コーナー順(回転4×反転2)の最良一致
+                for(let rev=0;rev<2;rev++){ const o=rev?[...obs].reverse():obs;
+                    for(let s=0;s<4;s++){ let e=0; for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); } if(e<be) be=e; }
+                }
+                errs.push(be/4);
+            }
+            if(!errs.length) return null;
+            errs.sort((a,b)=>a-b); return errs[Math.floor(errs.length/2)];
+        }
+        const QCORNER_MAX=40;                                     // px。正解は数〜十数px・flip解は数百px
+        const Q={}, Qs={}, Qe={}; let candTotal=0; const missIds=[];
         for(const id of pids){
             const cands=rotCands[id]||[]; candTotal+=cands.length;
             const pick=WMGeom.pickStableRotation(cands, 25, rotWts[id]);
-            const sup=pick?pick.support:0; sups.push(sup);
-            // 外向きゲートでflipは除去済み→残る低supportは正解のノイズ拡散で最大クラスタは正解。
-            // 旧0.25はflip50/50割れ対策だったがゲートが担うので0.15へ緩めて正解を拾う。
-            if(!pick || pick.support<0.15){ missIds.push(`ID${id}(支持${Math.round(sup*100)}% 候補${cands.length})`); continue; }
+            if(!pick){ missIds.push(`ID${id}(候補0)`); continue; }
             const close=cands.filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
-            Q[id]=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
-            Qs[id]=pick.support;
+            const Qc=close.length>=5 ? WMGeom.avgRotGS(close) : pick.R;
+            const cerr=qCornerErr(id, Qc);
+            if(cerr!=null && cerr>QCORNER_MAX){ missIds.push(`ID${id}(コーナー誤差${cerr.toFixed(0)}px>${QCORNER_MAX} 支持${Math.round(pick.support*100)}%)`); continue; }
+            if(cerr==null && pick.support<0.15){ missIds.push(`ID${id}(コーナー無・支持${Math.round(pick.support*100)}%)`); continue; }
+            Q[id]=Qc; Qs[id]=+pick.support.toFixed(2); Qe[id]=cerr;
         }
         // 保存（dodecaと共有 scanscope_dodeca_model）
         let modelObj={}; try{ modelObj=JSON.parse(localStorage.getItem('scanscope_dodeca_model')||'{}'); }catch(e){}
         modelObj[g]={ P:pos, Q, Qs, meta:{ rms:+medRms.toFixed(1), at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}), src:'photo' } };
         localStorage.setItem('scanscope_dodeca_model', JSON.stringify(modelObj));
-        const supMax=sups.length?Math.round(Math.max(...sups)*100):0, supMin=sups.length?Math.round(Math.min(...sups)*100):0;
-        log(`✅ ボス${g}モデル作成(写真): ${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}% 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
+        const svals=Object.values(Qs), evals=Object.values(Qe).filter(e=>e!=null);
+        const supMax=svals.length?Math.round(Math.max(...svals)*100):0, supMin=svals.length?Math.round(Math.min(...svals)*100):0;
+        const errTxt=evals.length?` コーナー誤差${Math.min(...evals).toFixed(0)}〜${Math.max(...evals).toFixed(0)}px`:'';
+        log(`✅ ボス${g}モデル作成(写真): ${placed.length}面 残差中央${medRms.toFixed(1)}mm 向き${Object.keys(Q).length}面(支持${supMin}〜${supMax}%${errTxt} 候補${candTotal})${failed.length?` 欠${failed.length}`:''}`);
         if(Object.keys(Q).length<placed.length) log(`　⚠ 向き未学習: ${missIds.join(' ')} → その面を正面・近距離から数枚追加（PnP対象外）`);
         refreshState();
     }
@@ -766,10 +800,10 @@
         log(`🔧 キャリブ写真${files.length}枚を追加（ボス${g}・蓄積中${calibPosFrames.length}枚）...`);
         for(const f of files){
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
-            const { fr, rr, n, pxs }=detectBossFrame(img, idMin, idMax);
+            const { fr, rr, cr, n, pxs, W, H }=detectBossFrame(img, idMin, idMax);
             URL.revokeObjectURL(img.src);
             if(n<2){ log(`　ボスタグ${n}枚（2枚未満→スキップ・最小px${MIN_WHEEL_PX}）`); continue; }
-            calibPosFrames.push(fr); calibRotFrames.push(rr);
+            calibPosFrames.push(fr); calibRotFrames.push(rr); calibCorFrames.push(cr); calibDimFrames.push({w:W,h:H});
             const pxRange = pxs.length?`px${Math.min(...pxs).toFixed(0)}〜${Math.max(...pxs).toFixed(0)}`:'';
             log(`　+1枚（ボスタグ${n}面 ${pxRange}）`);
         }
@@ -777,7 +811,7 @@
     };
     $('calibRunBtn').onclick = () => runBossCalib();
     $('calibResetBtn').onclick = () => {
-        calibPosFrames=[]; calibRotFrames=[]; updateCalibState();
+        calibPosFrames=[]; calibRotFrames=[]; calibCorFrames=[]; calibDimFrames=[]; updateCalibState();
         log('🧹 キャリブ写真の蓄積をリセット（モデル自体は消えません）');
     };
     </script>
