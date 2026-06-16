@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.11.1 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.2 — 床コーナーPnPの順解決を閾値で切らず常に最小再投影で採用(前回フォールバック修正)＋コーナー誤差px診断表示(worldR品質の判定用)／pa0.11.1 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -249,27 +249,35 @@
         }
         const t0 = vsub(cbar, matVec(R0, pbar));          // C = R0·P + t0
         // コーナーPnP（床タグ向き学習済み時）
+        const dbg={nHaveR:0, nResolved:0, errs:[]};
         if (floorWorldR) {
             const X=[], uv=[]; let nTag=0;
+            const K=camK();
             for (const f of visibleFloor) {
                 const Rw = floorWorldR[f.id], Wc = floorWorld[f.id];
                 if (!Rw || !Wc || !f.uv) continue;
+                dbg.nHaveR++;
                 const hh = floorTagSize(f.id)/2;
                 const Xc = TAG_LOCAL(hh).map(l=>{ const v=matVec(Rw,l); return [Wc[0]+v[0],Wc[1]+v[1],Wc[2]+v[2]]; });
-                const ord = resolveCornerOrderA(Xc, f.uv, R0, t0);
-                if (!ord) continue;
-                for (let k=0;k<4;k++){ X.push(Xc[k]); uv.push(ord[k]); }
-                nTag++;
+                // コーナー順を全8通りで最小再投影に合わせる（閾値で切らず採用＝学習worldRの誤差はpnpRefineが吸収）
+                const pred=Xc.map(x=>{ const Y=matVec(R0,x); const p=WMGeom.projectK(K,[Y[0]+t0[0],Y[1]+t0[1],Y[2]+t0[2]]); return [p.u,p.v]; });
+                let bestE=Infinity, bestArr=null;
+                for(let rev=0;rev<2;rev++){ const o=rev?[...f.uv].reverse():f.uv;
+                    for(let s=0;s<4;s++){ let e=0; for(let k=0;k<4;k++){ const p=o[(k+s)%4]; e+=Math.hypot(pred[k][0]-p[0],pred[k][1]-p[1]); }
+                        if(e<bestE){ bestE=e; bestArr=[0,1,2,3].map(k=>o[(k+s)%4]); } } }
+                dbg.errs.push(bestE/4);
+                for (let k=0;k<4;k++){ X.push(Xc[k]); uv.push(bestArr[k]); }
+                nTag++; dbg.nResolved++;
             }
             if (nTag>=2 && X.length>=8) {
-                const ref = WMGeom.pnpRefine(X, uv, camK(), R0, t0, 15);
+                const ref = WMGeom.pnpRefine(X, uv, K, R0, t0, 15);
                 if (ref && isFinite(ref.rmsPx)) {
                     const camPos = vsub([0,0,0], matVec(matT(ref.R), ref.t));   // camPos = -R^T·t
-                    return { R_world_to_cam: ref.R, camH: camPos[1], rms: rmsMm, rmsPx: ref.rmsPx, camPos, mode:'corner', nTag };
+                    return { R_world_to_cam: ref.R, camH: camPos[1], rms: rmsMm, rmsPx: ref.rmsPx, camPos, mode:'corner', nTag, dbg };
                 }
             }
         }
-        return { R_world_to_cam: R0, camH: pbar[1]-matVec(matT(R0),cbar)[1], rms: rmsMm, camPos: camPosOf(R0), mode:'center' };
+        return { R_world_to_cam: R0, camH: pbar[1]-matVec(matT(R0),cbar)[1], rms: rmsMm, camPos: camPosOf(R0), mode:'center', dbg };
     }
 
     function resolveCornerOrderA(Xc, obs, R, t){
@@ -530,7 +538,7 @@
         const offGate = imgW*gates.offPct/100;  // ボス中心が画面中心から離れすぎ=構図劣化(斜め/画面端)→除外
         if(off>offGate) reasons.push(`off${off.toFixed(0)}>${offGate.toFixed(0)}(${gates.offPct}%)`);
         return { pass:reasons.length===0, reason:reasons.join('/'), yaw, az, off, dist, h:cameraPose.camH*100, faces:est.faces, px:est.pnpRms, frms,
-                 cmode:cameraPose.mode, cnTag:cameraPose.nTag, crmsPx:cameraPose.rmsPx };
+                 cmode:cameraPose.mode, cnTag:cameraPose.nTag, crmsPx:cameraPose.rmsPx, cdbg:cameraPose.dbg };
     }
 
     // 4スロットから総トー・スラストライン・個別トーを計算して表示
@@ -950,7 +958,8 @@
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
             const r=viewbiasOne(img, g, gates); URL.revokeObjectURL(img.src);
             if(r.yaw==null){ log(`　#${i} ❌除外: ${r.reason}`); continue; }
-            const cm=r.cmode==='corner'?`床ｺｰﾅｰPnP${r.cnTag}枚${r.crmsPx.toFixed(1)}px`:'床中心Horn';
+            const dE=r.cdbg&&r.cdbg.errs&&r.cdbg.errs.length?(()=>{const e=[...r.cdbg.errs].sort((a,b)=>a-b);return e[Math.floor(e.length/2)].toFixed(0);})():'-';
+            const cm=(r.cmode==='corner'?`床ｺｰﾅｰPnP${r.cnTag}枚${r.crmsPx.toFixed(1)}px`:'床中心Horn')+` [worldR${r.cdbg?r.cdbg.nHaveR:0}枚/ｺｰﾅｰ誤差中央${dE}px]`;
             const line=`yaw${r.yaw.toFixed(2)}° 方位${r.az.toFixed(0)}° off${r.off.toFixed(0)}px 距離${(r.dist/10).toFixed(0)}cm 高${r.h.toFixed(0)}cm 面${r.faces} px${r.px!=null?r.px.toFixed(1):'-'} ${cm}`;
             if(r.pass){ good.push(r); log(`　#${i} ✅ ${line}`); }
             else log(`　#${i} ❌除外(${r.reason}): ${line}`);
