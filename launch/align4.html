@@ -7,7 +7,7 @@
     <title>ScanScope 4輪アライメント</title>
     <script>
     // バージョン付きURLでキャッシュ無効化。CDN伝搬中の新旧往復ループは2回で打ち切る
-    const _V = 'a0.10.3';
+    const _V = 'a0.10.4';
     {
         const n = +(sessionStorage.getItem('_vredir') || 0);
         if (!location.search.includes(_V) && n < 2) {
@@ -66,7 +66,7 @@
 
 <div id="start-screen">
     <h1>ScanScope 4輪アライメント</h1>
-    <p style="color:#555;">a0.10.3</p>
+    <p style="color:#555;">a0.10.4</p>
     <div class="badge">
         <b>使い方</b><br>
         ① dodeca.htmlで事前キャリブ済みのドデカを用意<br>
@@ -183,8 +183,11 @@ let frameCount = 0, fps = 0, lastFpsTime = performance.now();
 // ドデカと同原理: 床タグ中心(pose.t)の距離から配置を自動復元（定規不要）。
 // スケールはタグサイズ(FLOOR_TAG_SIZE)由来。復元後、床平面をy≈0に整列。
 let floorWorld = loadFloorWorld();   // {id:[x,y,z]} | null
-const FLOOR_IDS = [44, 45, 46, 47];
-let FLOOR_TAG_SIZE = 0.089; // 起動画面で選択（iPad89mm / 3Dプリントタイル199.42mm）。カメラ起動時に確定
+// 床タグID: 44〜59=大(iPad/200mmタイル・起動選択) / 61〜80=小タイル(黒部105mm固定)。別ID帯で大小混在可
+const FLOOR_IDS = (()=>{ const a=[]; for(let i=44;i<=80;i++) a.push(i); return a; })();
+const SMALL_FLOOR_SIZE = 0.105;  // 小タイル黒部105mm(ID61〜80)
+let FLOOR_TAG_SIZE = 0.089; // 大タグ用・起動画面で選択（iPad89mm / 200mmタイル199.42mm）。カメラ起動時に確定
+function floorTagSizeM(id){ return id>=61 ? SMALL_FLOOR_SIZE : FLOOR_TAG_SIZE; }
 const MIN_FLOOR_PX = 40;
 const MIN_WHEEL_PX = 60;
 
@@ -743,7 +746,7 @@ async function startCamera() {
     loadBodyModel();
     FLOOR_TAG_SIZE = parseFloat($('floorSizeSelect').value) || 0.089;
     for (let i = target.idMin; i <= target.idMax; i++) detector.set_tag_size(i, wheelTagSizeM(i));
-    for (const id of FLOOR_IDS) detector.set_tag_size(id, FLOOR_TAG_SIZE);
+    for (const id of FLOOR_IDS) detector.set_tag_size(id, floorTagSizeM(id));
     addLog(`ターゲット: ${target.label}（ID${target.idMin}〜${target.idMax}）・床タグ黒部${(FLOOR_TAG_SIZE*1000).toFixed(1)}mm`);
     acquireWakeLock();
     // 保存済み床マップが別サイズで学習されていたらスケールが狂う → 作り直しを要求
