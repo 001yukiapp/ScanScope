@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.1 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -529,7 +529,8 @@
         if(frms>gates.frms) reasons.push(`床rms${frms.toFixed(1)}>${gates.frms}`);
         const offGate = imgW*gates.offPct/100;  // ボス中心が画面中心から離れすぎ=構図劣化(斜め/画面端)→除外
         if(off>offGate) reasons.push(`off${off.toFixed(0)}>${offGate.toFixed(0)}(${gates.offPct}%)`);
-        return { pass:reasons.length===0, reason:reasons.join('/'), yaw, az, off, dist, h:cameraPose.camH*100, faces:est.faces, px:est.pnpRms, frms };
+        return { pass:reasons.length===0, reason:reasons.join('/'), yaw, az, off, dist, h:cameraPose.camH*100, faces:est.faces, px:est.pnpRms, frms,
+                 cmode:cameraPose.mode, cnTag:cameraPose.nTag, crmsPx:cameraPose.rmsPx };
     }
 
     // 4スロットから総トー・スラストライン・個別トーを計算して表示
@@ -942,13 +943,15 @@
         const gates={ faces:parseInt($('vbFaces').value)||6, px:parseFloat($('vbPx').value)||20, frms:parseFloat($('vbFrms').value)||8, offPct:parseFloat($('vbOff').value)||15 };
         log('────────────');
         log(`🎯 視点バイアステスト: ボス${g}・${files.length}枚（ゲート 面≥${gates.faces}/PnP<${gates.px}px/床rms<${gates.frms}mm/off<${gates.offPct}%）`);
+        log(`　床向きworldR: ${floorWorldR?Object.keys(floorWorldR).length+'枚 学習済→コーナーPnP有効':'なし→中心Hornのまま(床マップ作り直しが必要)'}`);
         const good=[]; let i=0;
         for(const f of files){
             i++;
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
             const r=viewbiasOne(img, g, gates); URL.revokeObjectURL(img.src);
             if(r.yaw==null){ log(`　#${i} ❌除外: ${r.reason}`); continue; }
-            const line=`yaw${r.yaw.toFixed(2)}° 方位${r.az.toFixed(0)}° off${r.off.toFixed(0)}px 距離${(r.dist/10).toFixed(0)}cm 高${r.h.toFixed(0)}cm 面${r.faces} px${r.px!=null?r.px.toFixed(1):'-'} 床${r.frms.toFixed(1)}mm`;
+            const cm=r.cmode==='corner'?`床ｺｰﾅｰPnP${r.cnTag}枚${r.crmsPx.toFixed(1)}px`:'床中心Horn';
+            const line=`yaw${r.yaw.toFixed(2)}° 方位${r.az.toFixed(0)}° off${r.off.toFixed(0)}px 距離${(r.dist/10).toFixed(0)}cm 高${r.h.toFixed(0)}cm 面${r.faces} px${r.px!=null?r.px.toFixed(1):'-'} ${cm}`;
             if(r.pass){ good.push(r); log(`　#${i} ✅ ${line}`); }
             else log(`　#${i} ❌除外(${r.reason}): ${line}`);
         }
