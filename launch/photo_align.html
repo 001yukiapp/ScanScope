@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.11.2 — 床コーナーPnPの順解決を閾値で切らず常に最小再投影で採用(前回フォールバック修正)＋コーナー誤差px診断表示(worldR品質の判定用)／pa0.11.1 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.3 — 床worldR学習をpickStableRotation化(フリップ排除): 単純平均は単タグposeのフリップ解混入でworldRが壊れコーナー誤差230px・yaw崩壊→pose.R/asol.R両候補を集めクラスタ最大解を採用(bossキャリブ同方式)。★要床マップ作り直し／pa0.11.2 — 順解決閾値撤廃＋誤差px診断 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -789,7 +789,8 @@
         for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
         let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
         const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
-        const fr={}, frR={}; for(const d of floorDets){ fr[d.id]=floorK1T(d); frR[d.id]=d.pose.R; }  // frR=タグlocal→カメラ（コーナーPnP用world向きの算出に使う）
+        const fr={}, frR={}; for(const d of floorDets){ fr[d.id]=floorK1T(d);  // frR=タグlocal→カメラの候補(pose.R + asol.R)。単タグposeのフリップ曖昧性をpickStableRotationで排除するため両解を渡す
+            const cs=[]; if(d.pose.R)cs.push(d.pose.R); if(d.pose.asol&&d.pose.asol.R)cs.push(d.pose.asol.R); frR[d.id]=cs; }
         return { fr, frR, n:floorDets.length, floorDets };
     }
     function orthoCols(M){ // 3x3列をGram-Schmidt正規直交化（平均回転の整形）
@@ -840,18 +841,22 @@
         const world={}; let maxOff=0;
         for(const id of ids){ const d=vsub(pos[id],o); const p=[vdot(d,ex),vdot(d,ey),vdot(d,ez)]; maxOff=Math.max(maxOff,Math.abs(p[1])); world[id]=p; }
         const rmss=[];
-        // 各床タグのworld向き worldR を算出（フレームごとにworld→cam姿勢solRを出し、R_tag_world=solR^T·R_tag_cam を平均）
-        const Racc={}; // id: 累積3x3
+        // 各床タグのworld向き worldR を算出。フレームごとにworld→cam姿勢solRを出し、R_tag_world=solR^T·R_tag_cam を各候補(pose.R/asol.R)で集約
+        // → pickStableRotationでフリップ解を排除し最大クラスタを採用（bossキャリブと同方式）。単純平均はフリップ混入で壊れる。
+        const cand={}; // id: [Rtw候補...]
         for(const f of frames){ const fr=f.fr, frR=f.frR||{};
             const fids=Object.keys(fr).filter(id=>world[id]); if(fids.length<3) continue;
-            rmss.push(WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).rms*1000);
-            const solR=WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).R;
-            const solRt=matT(solR);
-            for(const id of fids){ if(!frR[id]) continue; const Rtw=matMul(solRt, frR[id]);
-                if(!Racc[id]) Racc[id]=[[0,0,0],[0,0,0],[0,0,0]];
-                for(let i=0;i<3;i++)for(let j=0;j<3;j++) Racc[id][i][j]+=Rtw[i][j]; }
+            const sol=WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id]));
+            rmss.push(sol.rms*1000);
+            const solRt=matT(sol.R);
+            for(const id of fids){ const cs=frR[id]; if(!cs) continue; const list=Array.isArray(cs)?cs:[cs];
+                for(const Rc of list){ if(!Rc) continue; (cand[id]=cand[id]||[]).push(matMul(solRt,Rc)); } }
         }
-        const worldR={}; for(const id in Racc) worldR[id]=orthoCols(Racc[id]);
+        const worldR={};
+        for(const id in cand){ const pick=WMGeom.pickStableRotation(cand[id],25);
+            if(!pick||pick.support<0.3) continue;
+            const close=cand[id].filter(R=>WMGeom.rotAngleDeg(pick.R,R)<12);
+            worldR[id]= close.length>=4 ? WMGeom.avgRotGS(close) : pick.R; }
         rmss.sort((a,b)=>a-b);
         return { world, worldR, ids, planar:maxOff*1000, medRms:(rmss.length?rmss[Math.floor(rmss.length/2)]:0), failed };
     }
