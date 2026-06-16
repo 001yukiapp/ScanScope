@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -103,6 +103,21 @@
             <button id="slotResetBtn" class="sec">4輪クリア</button>
         </div>
         <div id="alignTable" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="panel">
+        <div style="font-size:14px;font-weight:600;margin-bottom:6px;">🎯 視点バイアステスト（1輪・複数視点）</div>
+        <div style="color:#888;font-size:12px;margin-bottom:8px;">
+            同じ静止ボスを色々な視点で複数枚撮る → world向きが視点でどれだけブレるか（＝視点バイアス残差）をゲート付きで実測。
+            ボスはなるべく正面8面PnP・床は斜めでも3枚見えればOK。ゲート落ちは平均に入れず取り直し。
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:13px;">
+            <label>ボス</label><select id="vbBoss"><option value="A">前A(1-8)</option><option value="B">後B(9-16)</option></select>
+            <label>面≥</label><input id="vbFaces" type="number" value="6" min="4" max="8" style="width:48px;">
+            <label>PnP&lt;</label><input id="vbPx" type="number" value="20" min="5" max="60" step="1" style="width:52px;">px
+            <label>床rms&lt;</label><input id="vbFrms" type="number" value="8" min="2" max="30" step="0.5" style="width:52px;">mm
+        </div>
+        <div style="margin-top:8px;"><button id="vbBtn">🎯 視点バイアス写真を選ぶ（複数）</button></div>
     </div>
 
     <div id="result"></div>
@@ -444,6 +459,49 @@
         }
         $('result').innerHTML = `<div style="font-size:14px;">この写真: <b>${okCount}輪</b>を記録（${side==='L'?'左側':'右側'}）</div>`;
         renderAlign();
+    }
+
+    // ===== ④ 視点バイアステスト（1輪・複数視点・ゲート付き）=====
+    // 同じ静止ボスを複数視点で撮り、world yaw が視点でどれだけブレるか＝視点バイアス残差を実測。
+    function viewbiasOne(img, g, gates){
+        imgW=img.naturalWidth; imgH=img.naturalHeight;
+        canvas.width=imgW; canvas.height=imgH; cctx.drawImage(img,0,0,imgW,imgH);
+        photoFx=parseFloat($('fxInput').value)||2868; readMinWheelPx();
+        detector.set_camera_info(photoFx,photoFx,imgW/2,imgH/2);
+        for(let id=1;id<=16;id++) detector.set_tag_size(id,(id===1||id===9)?0.080:0.055);
+        for(const id of FLOOR_IDS) detector.set_tag_size(id,floorTagSize(id));
+        const idata=cctx.getImageData(0,0,imgW,imgH); const gray=new Uint8Array(imgW*imgH);
+        for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
+        let dets=[]; try{ dets=detector.detect(gray,imgW,imgH)||[]; }catch(e){ return {reason:'detect例外'}; }
+        const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
+        if(floorDets.length<3) return {reason:`床${floorDets.length}枚<3`};
+        const cameraPose=localizeCamera(floorDets.map(d=>({id:d.id,t:floorK1T(d)})));
+        if(!cameraPose) return {reason:'カメラ自己位置NG'};
+        const frms=cameraPose.rms*1000;
+        loadModels(); const M=models[g];
+        if(!M) return {reason:`ボス${g}モデル無`, frms};
+        const min=g==='A'?1:9, max=g==='A'?8:16;
+        const inRange=dets.filter(d=>d.pose&&d.id>=min&&d.id<=max);
+        const withPx=inRange.map(d=>({d,px:tagPx(d)})).sort((a,b)=>b.px-a.px);
+        const wheelDets=withPx.filter(o=>o.px>=MIN_WHEEL_PX).map(o=>o.d);
+        if(wheelDets.length===0) return {reason:'ボス未検出', frms};
+        const est=estimateWheelPose(wheelDets,cameraPose,M);
+        if(!(est&&est.R&&est.mode==='world')) return {reason:est?(est.err||est.mode):'NG', frms, faces:est&&est.faces};
+        const axM=groupAxisModel(M); if(!axM) return {reason:'リング軸NG', frms};
+        const axW=vnorm(matVec(est.R,axM));
+        const yaw=Math.atan2(axW[0],axW[2])*180/Math.PI;
+        const cp=cameraPose.camPos, wp=est.worldPos;
+        const dx=cp[0]-wp[0], dy=cp[1]-wp[1], dz=cp[2]-wp[2];
+        const az=Math.atan2(dx,dz)*180/Math.PI;          // ボス基準のカメラ水平方位
+        const dist=Math.hypot(dx,dy,dz)*1000;            // mm
+        let sx=0,sy=0,nc=0; for(const d of wheelDets){ for(const c of d.corners){ sx+=c.x; sy+=c.y; nc++; } }
+        const off=Math.hypot(sx/nc-imgW/2, sy/nc-imgH/2); // ボス中心の画面オフセットpx
+        const reasons=[];
+        if(est.faces<gates.faces) reasons.push(`面${est.faces}<${gates.faces}`);
+        if(est.pnpRms==null) reasons.push('中心法(PnP無)');
+        else if(est.pnpRms>gates.px) reasons.push(`px${est.pnpRms.toFixed(1)}>${gates.px}`);
+        if(frms>gates.frms) reasons.push(`床rms${frms.toFixed(1)}>${gates.frms}`);
+        return { pass:reasons.length===0, reason:reasons.join('/'), yaw, az, off, dist, h:cameraPose.camH*100, faces:est.faces, px:est.pnpRms, frms };
     }
 
     // 4スロットから総トー・スラストライン・個別トーを計算して表示
@@ -825,6 +883,37 @@
         $('alignTable').innerHTML=''; $('result').innerHTML='';
         log('🧹 4輪スロットをクリア');
         renderAlign();
+    };
+    // ④ 視点バイアステスト
+    const vbInput = document.createElement('input');
+    vbInput.type='file'; vbInput.accept='image/*'; vbInput.multiple=true; vbInput.style.display='none';
+    document.body.appendChild(vbInput);
+    $('vbBtn').onclick = () => vbInput.click();
+    vbInput.onchange = async e => {
+        const files=[...e.target.files]; if(!files.length) return;
+        if(!detector){ log('❌ detector未初期化'); return; }
+        const g=$('vbBoss').value;
+        const gates={ faces:parseInt($('vbFaces').value)||6, px:parseFloat($('vbPx').value)||20, frms:parseFloat($('vbFrms').value)||8 };
+        log('────────────');
+        log(`🎯 視点バイアステスト: ボス${g}・${files.length}枚（ゲート 面≥${gates.faces}/PnP<${gates.px}px/床rms<${gates.frms}mm）`);
+        const good=[]; let i=0;
+        for(const f of files){
+            i++;
+            const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
+            const r=viewbiasOne(img, g, gates); URL.revokeObjectURL(img.src);
+            if(r.yaw==null){ log(`　#${i} ❌除外: ${r.reason}`); continue; }
+            const line=`yaw${r.yaw.toFixed(2)}° 方位${r.az.toFixed(0)}° off${r.off.toFixed(0)}px 距離${(r.dist/10).toFixed(0)}cm 高${r.h.toFixed(0)}cm 面${r.faces} px${r.px!=null?r.px.toFixed(1):'-'} 床${r.frms.toFixed(1)}mm`;
+            if(r.pass){ good.push(r); log(`　#${i} ✅ ${line}`); }
+            else log(`　#${i} ❌除外(${r.reason}): ${line}`);
+        }
+        vbInput.value='';
+        if(good.length<2){ log(`　採用${good.length}枚（2枚未満→ばらつき出せず・取り直し）`); return; }
+        const ys=good.map(r=>r.yaw); const mean=ys.reduce((a,b)=>a+b,0)/ys.length;
+        const sd=Math.sqrt(ys.reduce((a,b)=>a+(b-mean)**2,0)/ys.length);
+        const spread=Math.max(...ys)-Math.min(...ys);
+        log(`　── 採用${good.length}枚: yaw平均${mean.toFixed(2)}° ばらつき(max-min)${spread.toFixed(2)}° σ${sd.toFixed(2)}° ＝視点バイアス残差`);
+        log('　[解析用] viewbias_test.js の DATA に貼る:');
+        log('  '+JSON.stringify(good.map(r=>({yaw:+r.yaw.toFixed(3), az:+r.az.toFixed(1), off:+r.off.toFixed(0), dist:+r.dist.toFixed(0), h:+r.h.toFixed(1)}))));
     };
     // ボスキャリブ（写真）
     const calibInput = document.createElement('input');
