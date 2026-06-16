@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.11.9 — localizeCamera: マップ外タグを除外(known filter)→大小混在床タグで「カメラ自己位置NG」が出る根本バグ修正。床マップ4枚でも測定写真に別IDタグが写ればnull返しになっていた／pa0.11.8 — 床マップが新タグで育つよう修正: 悪化却下ゲートが新タグ追加フレームまで弾きマップが大4枚に縮む問題→新タグを足す(残差15mm以内)フレームは採用。8枚等の多タグ床マップが作れる／pa0.11.7 — worldR再投影検証: 候補を貪欲クラスタ→各クラスタ平均を平面スナップ→観測コーナー再投影誤差が最小かつ40px以内の向きだけ採用。フリップ/ゴミは再投影で落ちる(規約非依存)。pa0.11.6の法線フィルタは両解同符号で全滅した反省→実データ照合方式に。要床マップ作り直し／pa0.11.6 — 法線フィルタ(失敗): 床タグ法線は必ずカメラ側を向くので、候補のうち法線がカメラを向かない解(=単タグposeの裏フリップ)を捨ててからクラスタリング。pa0.11.5までコーナーPnPが鏡像(camH負・2000px)に発散した根因＝フリップ解の混入を排除。要床マップ作り直し／pa0.11.5 — 床平面拘束＋安全ガード(タグ法線=真上にスナップ・25°外れは不採用)＋localizeに安全ガード(コーナーPnPが床下解/高rms/中心Hornと大乖離→中心Hornにフォールバック)。pa0.11.4で発生したコーナーPnP発散(床下解・2000px)を原理的に排除。要床マップ作り直し／pa0.11.4 — 採用条件緩和(クラスタ3個以上で採用・密集浅角でも通過率UP)。pa0.11.3でフリップ排除しコーナー誤差230→40pxに改善も4枚中1枚しか学習せずコーナーPnP不発(2枚必要)の対策。要床マップ作り直し／pa0.11.3 — フリップ排除: 単純平均は単タグposeのフリップ解混入でworldRが壊れコーナー誤差230px・yaw崩壊→pose.R/asol.R両候補を集めクラスタ最大解を採用(bossキャリブ同方式)。★要床マップ作り直し／pa0.11.2 — 順解決閾値撤廃＋誤差px診断 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.10 — 床マップ退行防止(regressed check)+worldR単一フレーム採用: タグ枚数が減るフレームを常にreject→8枚→4枚退行を防止。worldRクラスタ最小2枚条件を撤廃→小タグが1フレームのみでもreprojErr<40pxなら採用でコーナーPnP発動率改善／pa0.11.9 — localizeCamera: マップ外タグを除外(known filter)→大小混在床タグで「カメラ自己位置NG」が出る根本バグ修正。床マップ4枚でも測定写真に別IDタグが写ればnull返しになっていた／pa0.11.8 — 床マップが新タグで育つよう修正: 悪化却下ゲートが新タグ追加フレームまで弾きマップが大4枚に縮む問題→新タグを足す(残差15mm以内)フレームは採用。8枚等の多タグ床マップが作れる／pa0.11.7 — worldR再投影検証: 候補を貪欲クラスタ→各クラスタ平均を平面スナップ→観測コーナー再投影誤差が最小かつ40px以内の向きだけ採用。フリップ/ゴミは再投影で落ちる(規約非依存)。pa0.11.6の法線フィルタは両解同符号で全滅した反省→実データ照合方式に。要床マップ作り直し／pa0.11.6 — 法線フィルタ(失敗): 床タグ法線は必ずカメラ側を向くので、候補のうち法線がカメラを向かない解(=単タグposeの裏フリップ)を捨ててからクラスタリング。pa0.11.5までコーナーPnPが鏡像(camH負・2000px)に発散した根因＝フリップ解の混入を排除。要床マップ作り直し／pa0.11.5 — 床平面拘束＋安全ガード(タグ法線=真上にスナップ・25°外れは不採用)＋localizeに安全ガード(コーナーPnPが床下解/高rms/中心Hornと大乖離→中心Hornにフォールバック)。pa0.11.4で発生したコーナーPnP発散(床下解・2000px)を原理的に排除。要床マップ作り直し／pa0.11.4 — 採用条件緩和(クラスタ3個以上で採用・密集浅角でも通過率UP)。pa0.11.3でフリップ排除しコーナー誤差230→40pxに改善も4枚中1枚しか学習せずコーナーPnP不発(2枚必要)の対策。要床マップ作り直し／pa0.11.3 — フリップ排除: 単純平均は単タグposeのフリップ解混入でworldRが壊れコーナー誤差230px・yaw崩壊→pose.R/asol.R両候補を集めクラスタ最大解を採用(bossキャリブ同方式)。★要床マップ作り直し／pa0.11.2 — 順解決閾値撤廃＋誤差px診断 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -884,11 +884,12 @@
             const cl=[]; for(const R of cand[id]){ let pl=false; for(const c of cl){ if(WMGeom.rotAngleDeg(c.rep,R)<20){c.list.push(R);pl=true;break;} } if(!pl)cl.push({rep:R,list:[R]}); }
             cl.sort((a,b)=>b.list.length-a.list.length);
             let best=null;
-            for(const c of cl.slice(0,4)){ if(c.list.length<2) continue;
+            for(const c of cl.slice(0,4)){
                 const Rw=planeSnap(WMGeom.avgRotGS(c.list)); if(!Rw) continue;
                 const e=reprojErr(id,Rw); if(e==null) continue;
-                if(!best||e<best.e) best={Rw,e}; }
-            if(best && best.e<40) worldR[id]=best.Rw;   // 再投影40px以内のみ採用
+                const thresh = c.list.length<2 ? 20 : 40;  // 単一フレームは過適合リスク→閾値厳しく
+                if(!best||e<best.e) best={Rw,e,thresh}; }
+            if(best && best.e<best.thresh) worldR[id]=best.Rw;  // 単一フレーム=20px・複数=40px
         }
         rmss.sort((a,b)=>a-b);
         return { world, worldR, ids, planar:maxOff*1000, medRms:(rmss.length?rmss[Math.floor(rmss.length/2)]:0), failed };
@@ -939,17 +940,20 @@
                 addPhotoCard(fname, thumb, 0, 'rejected', `床タグ${n}枚 | 構築失敗`);
                 continue;
             }
-            // 1〜2枚目は無条件採用（残差は2枚以上で初めて意味を持つ）。
-            // 3枚目以降は平面度・残差中央のどちらかが悪化したら却下（悪い観測でマップを汚さない）
-            const grew = res.ids.length > lastNids && res.medRms < 15;   // 新タグを足す(残差15mm以内)なら採用＝マップを育てる
+            // タグ枚数が減るフレームは無条件reject（8枚→4枚への退行を防ぐ）
+            // 新タグを足す(残差15mm以内)なら残差悪化でも採用してマップを育てる
+            // 3枚目以降は平面度・残差中央が悪化したら却下
+            const regressed = res.ids.length < lastNids;
+            const grew = res.ids.length > lastNids && res.medRms < 15;
             const worse = floorFrames.length>2 && (res.planar>lastPlanar || res.medRms>lastMedRms);
-            if(!worse || grew){
+            if((!regressed && !worse) || grew){
                 applyFloorMap(res, floorFrames.length); lastPlanar=res.planar; lastMedRms=res.medRms; lastNids=res.ids.length;
                 addPhotoCard(fname, thumb, floorFrames.length, 'adopted',
                     `床タグ${n}枚 | ${res.ids.length}タグ 残差${res.medRms.toFixed(1)}mm 平面度${res.planar.toFixed(1)}mm`);
             } else {
                 floorFrames.pop();
-                log(`　床タグ${n}枚 → 悪化につき却下: 平面度${res.planar.toFixed(1)}(前${lastPlanar.toFixed(1)}) 残差${res.medRms.toFixed(1)}(前${lastMedRms.toFixed(1)})`);
+                const reason = regressed?`退行(${res.ids.length}<${lastNids}枚)`:grew?`grew却下(残差${res.medRms.toFixed(1)}mm)`:`悪化(残差${res.medRms.toFixed(1)}>${lastMedRms.toFixed(1)} 平面度${res.planar.toFixed(1)}>${lastPlanar.toFixed(1)})`;
+                log(`　床タグ${n}枚(map${res.ids.length}枚) → 却下: ${reason}`);
                 addPhotoCard(fname, thumb, 0, 'rejected',
                     `床タグ${n}枚 | 残差${res.medRms.toFixed(1)}mm(前${lastMedRms.toFixed(1)}) 平面度${res.planar.toFixed(1)}mm(前${lastPlanar.toFixed(1)})`);
             }
