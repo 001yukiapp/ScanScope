@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -157,7 +157,12 @@
         try { const s = localStorage.getItem('scanscope_floor_world'); if (s) return JSON.parse(s); } catch(e) {}
         return null;
     }
+    function loadFloorWorldR(){
+        try { const s = localStorage.getItem('scanscope_floor_worldR'); if (s) return JSON.parse(s); } catch(e) {}
+        return null;
+    }
     let floorWorld = loadFloorWorld();
+    let floorWorldR = loadFloorWorldR();   // {id: R_tag_world(3x3)} 床タグのworld向き（コーナーPnP用・無ければ中心Hornにフォールバック）
     // グループ別モデル（A=前ボス・B=後ボス）。Step2は両方を1枚から処理する。
     // idMin（上面タグ）はリング軸の符号統一に使う（bodyAxis相当）。
     const GROUP_DEF = { A:{idMin:1, label:'前A'}, B:{idMin:9, label:'後B'} };
@@ -198,7 +203,7 @@
     }
 
     function refreshState(){
-        loadModels(); floorWorld = loadFloorWorld();
+        loadModels(); floorWorld = loadFloorWorld(); floorWorldR = loadFloorWorldR();
         const mtxt = g => models[g] ? `${GROUP_DEF[g].label}:${Object.keys(models[g].P).length}面${models[g].Q?'(PnP可)':'(PnP不可)'}` : `${GROUP_DEF[g].label}:無`;
         const f = floorWorld ? `床マップ${Object.keys(floorWorld).length}枚` : '❌床マップ無（align4 or 上の🗺️で作成）';
         $('state').textContent = `${mtxt('A')} / ${mtxt('B')} / ${f}`;
@@ -223,7 +228,10 @@
     function floorK1T(d){ return d.pose.t; }  // k1=0前提（歪み補正済み）→ホモグラフィのpose.tをそのまま使う
     function tagPx(d){ const c=d.corners; let s=0; for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];s+=Math.hypot(b.x-a.x,b.y-a.y);} return s/4; }
 
-    // ===== カメラ自己位置（床タグ→世界、align4と同じ）=====
+    // ===== カメラ自己位置（床タグ→世界）=====
+    // 中心Horn（位置点）で初期化→床タグ向き(floorWorldR)があれば四隅コーナーPnPで精緻化。
+    // 中心HornはカメラyawがΔ床中心ノイズ÷ベースラインで悪化（近接=短ベースラインで荒れる）。
+    // コーナーPnPは各タグの四隅(向き)が回転を直接拘束し、短ベースラインでもyawを守る（合成テストfloor_corner_test.jsで7〜20倍改善を確認）。
     function localizeCamera(visibleFloor) {
         if (!floorWorld) return null;
         if (visibleFloor.length < 3) return null;
@@ -232,19 +240,36 @@
         if (P.some(p => !p)) return null;
         const sol = WMGeom.hornPose(P, C);
         const pbar = centroid3(P), cbar = centroid3(C);
-        // カメラのworld位置 = pbar - R^T·cbar（C=R·X+t形式・カメラ原点C=0のworld座標）。Step3の位置算出に使う。
         const camPosOf = R => vsub(pbar, matVec(matT(R), cbar));
-        const Rt = matT(sol.R);
-        const camY = pbar[1] - matVec(Rt, cbar)[1];
-        if (camY < 0) {
-            const Cmirror = C.map(c => [c[0], c[1], -c[2]]);
-            const sol2 = WMGeom.hornPose(P, Cmirror);
-            const R2 = sol2.R;
-            const R_fixed = [[R2[0][0],R2[0][1],-R2[0][2]],[R2[1][0],R2[1][1],-R2[1][2]],[-R2[2][0],-R2[2][1],R2[2][2]]];
-            const camY2 = pbar[1] - matVec(matT(R_fixed), cbar)[1];
-            return { R_world_to_cam: R_fixed, camH: camY2, rms: sol2.rms, camPos: camPosOf(R_fixed) };
+        let R0 = sol.R, rmsMm = sol.rms;
+        if (pbar[1] - matVec(matT(R0), cbar)[1] < 0) {   // カメラが床下=鏡像解→z反転で修正
+            const sol2 = WMGeom.hornPose(P, C.map(c => [c[0], c[1], -c[2]])); const R2 = sol2.R;
+            R0 = [[R2[0][0],R2[0][1],-R2[0][2]],[R2[1][0],R2[1][1],-R2[1][2]],[-R2[2][0],-R2[2][1],R2[2][2]]];
+            rmsMm = sol2.rms;
         }
-        return { R_world_to_cam: sol.R, camH: camY, rms: sol.rms, camPos: camPosOf(sol.R) };
+        const t0 = vsub(cbar, matVec(R0, pbar));          // C = R0·P + t0
+        // コーナーPnP（床タグ向き学習済み時）
+        if (floorWorldR) {
+            const X=[], uv=[]; let nTag=0;
+            for (const f of visibleFloor) {
+                const Rw = floorWorldR[f.id], Wc = floorWorld[f.id];
+                if (!Rw || !Wc || !f.uv) continue;
+                const hh = floorTagSize(f.id)/2;
+                const Xc = TAG_LOCAL(hh).map(l=>{ const v=matVec(Rw,l); return [Wc[0]+v[0],Wc[1]+v[1],Wc[2]+v[2]]; });
+                const ord = resolveCornerOrderA(Xc, f.uv, R0, t0);
+                if (!ord) continue;
+                for (let k=0;k<4;k++){ X.push(Xc[k]); uv.push(ord[k]); }
+                nTag++;
+            }
+            if (nTag>=2 && X.length>=8) {
+                const ref = WMGeom.pnpRefine(X, uv, camK(), R0, t0, 15);
+                if (ref && isFinite(ref.rmsPx)) {
+                    const camPos = vsub([0,0,0], matVec(matT(ref.R), ref.t));   // camPos = -R^T·t
+                    return { R_world_to_cam: ref.R, camH: camPos[1], rms: rmsMm, rmsPx: ref.rmsPx, camPos, mode:'corner', nTag };
+                }
+            }
+        }
+        return { R_world_to_cam: R0, camH: pbar[1]-matVec(matT(R0),cbar)[1], rms: rmsMm, camPos: camPosOf(R0), mode:'center' };
     }
 
     function resolveCornerOrderA(Xc, obs, R, t){
@@ -410,14 +435,14 @@
 
         let cameraPose=null;
         if(floorDets.length>=3){
-            cameraPose=localizeCamera(floorDets.map(d=>({id:d.id, t:floorK1T(d)})));
+            cameraPose=localizeCamera(floorDets.map(d=>({id:d.id, t:floorK1T(d), uv:d.corners.map(c=>[c.x,c.y])})));
         }
         if(!cameraPose){
             log(`⚠ カメラ自己位置なし（床タグ3枚以上必要・現在${floorDets.length}枚）→ この写真はスキップ`);
             $('result').innerHTML = `<div style="color:#ff6b6b;">床タグ${floorDets.length}枚（3枚以上必要）→ world座標が出ません</div>`;
             return;
         }
-        log(`カメラ自己位置: 床PnP rms${(cameraPose.rms*1000).toFixed(1)}mm 高さ${(cameraPose.camH*100).toFixed(0)}cm`);
+        log(`カメラ自己位置: 床${cameraPose.mode==='corner'?`コーナーPnP${cameraPose.nTag}枚 ${cameraPose.rmsPx.toFixed(1)}px`:'中心Horn'} rms${(cameraPose.rms*1000).toFixed(1)}mm 高さ${(cameraPose.camH*100).toFixed(0)}cm`);
 
         loadModels();
         const GRP = [
@@ -476,7 +501,7 @@
         let dets=[]; try{ dets=detector.detect(gray,imgW,imgH)||[]; }catch(e){ return {reason:'detect例外'}; }
         const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
         if(floorDets.length<3) return {reason:`床${floorDets.length}枚<3`};
-        const cameraPose=localizeCamera(floorDets.map(d=>({id:d.id,t:floorK1T(d)})));
+        const cameraPose=localizeCamera(floorDets.map(d=>({id:d.id,t:floorK1T(d),uv:d.corners.map(c=>[c.x,c.y])})));
         if(!cameraPose) return {reason:'カメラ自己位置NG'};
         const frms=cameraPose.rms*1000;
         loadModels(); const M=models[g];
@@ -755,8 +780,13 @@
         for(let i=0;i<gray.length;i++) gray[i]=(idata.data[i*4]*77+idata.data[i*4+1]*151+idata.data[i*4+2]*28)>>8;
         let dets=[]; try{ dets=detector.detect(gray,W,H)||[]; }catch(e){}
         const floorDets=dets.filter(d=>d.pose&&FLOOR_IDS.includes(d.id)&&tagPx(d)>=MIN_FLOOR_PX);
-        const fr={}; for(const d of floorDets) fr[d.id]=floorK1T(d);
-        return { fr, n:floorDets.length, floorDets };
+        const fr={}, frR={}; for(const d of floorDets){ fr[d.id]=floorK1T(d); frR[d.id]=d.pose.R; }  // frR=タグlocal→カメラ（コーナーPnP用world向きの算出に使う）
+        return { fr, frR, n:floorDets.length, floorDets };
+    }
+    function orthoCols(M){ // 3x3列をGram-Schmidt正規直交化（平均回転の整形）
+        let a=[M[0][0],M[1][0],M[2][0]], b=[M[0][1],M[1][1],M[2][1]];
+        a=vnorm(a); b=vnorm(vsub(b, a.map(x=>x*vdot(a,b)))); const c=vcross(a,b);
+        return [[a[0],b[0],c[0]],[a[1],b[1],c[1]],[a[2],b[2],c[2]]];
     }
     function captureThumb(floorDets){
         // 検出タグを枠描きしてからサムネイルを取得
@@ -787,10 +817,10 @@
         grid.prepend(card);  // 新しいものを先頭に
         $('photoResults').style.display='';
     }
-    // frames群から床マップを構築（保存はしない・結果を返すだけ）
+    // frames群から床マップを構築（保存はしない・結果を返すだけ）。frames=[{fr:{id:中心cam}, frR:{id:R_local→cam}}]
     function computeFloorMap(frames){
-        const idset=new Set(); frames.forEach(fr=>Object.keys(fr).forEach(id=>idset.add(+id)));
-        const { pos, placed, failed } = WMGeom.buildBody([...idset], frames);
+        const idset=new Set(); frames.forEach(f=>Object.keys(f.fr).forEach(id=>idset.add(+id)));
+        const { pos, placed, failed } = WMGeom.buildBody([...idset], frames.map(f=>f.fr));
         if(placed.length<3) return null;
         const ids=placed.map(Number).sort((a,b)=>a-b);
         const o=pos[ids[0]]; const ex=vnorm(vsub(pos[ids[1]],o));
@@ -801,13 +831,26 @@
         const world={}; let maxOff=0;
         for(const id of ids){ const d=vsub(pos[id],o); const p=[vdot(d,ex),vdot(d,ey),vdot(d,ez)]; maxOff=Math.max(maxOff,Math.abs(p[1])); world[id]=p; }
         const rmss=[];
-        for(const fr of frames){ const fids=Object.keys(fr).filter(id=>world[id]); if(fids.length<3)continue; rmss.push(WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).rms*1000); }
+        // 各床タグのworld向き worldR を算出（フレームごとにworld→cam姿勢solRを出し、R_tag_world=solR^T·R_tag_cam を平均）
+        const Racc={}; // id: 累積3x3
+        for(const f of frames){ const fr=f.fr, frR=f.frR||{};
+            const fids=Object.keys(fr).filter(id=>world[id]); if(fids.length<3) continue;
+            rmss.push(WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).rms*1000);
+            const solR=WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id])).R;
+            const solRt=matT(solR);
+            for(const id of fids){ if(!frR[id]) continue; const Rtw=matMul(solRt, frR[id]);
+                if(!Racc[id]) Racc[id]=[[0,0,0],[0,0,0],[0,0,0]];
+                for(let i=0;i<3;i++)for(let j=0;j<3;j++) Racc[id][i][j]+=Rtw[i][j]; }
+        }
+        const worldR={}; for(const id in Racc) worldR[id]=orthoCols(Racc[id]);
         rmss.sort((a,b)=>a-b);
-        return { world, ids, planar:maxOff*1000, medRms:(rmss.length?rmss[Math.floor(rmss.length/2)]:0), failed };
+        return { world, worldR, ids, planar:maxOff*1000, medRms:(rmss.length?rmss[Math.floor(rmss.length/2)]:0), failed };
     }
     function applyFloorMap(res, nFrames){
-        floorWorld=res.world;
+        floorWorld=res.world; floorWorldR=res.worldR||null;
         localStorage.setItem('scanscope_floor_world', JSON.stringify(res.world));
+        if(res.worldR) localStorage.setItem('scanscope_floor_worldR', JSON.stringify(res.worldR));
+        else localStorage.removeItem('scanscope_floor_worldR');
         const floorSz=floorTagSize(res.ids.find(id=>id>=61)!=null?61:44);  // マップに小タイル(≥61)が含まれれば105・なければ入力欄
         localStorage.setItem('scanscope_floor_meta', JSON.stringify({ rms:+res.medRms.toFixed(1), planar:+res.planar.toFixed(1), k1:0, size:floorSz, at:new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) }));
         const dists=[];
@@ -833,7 +876,7 @@
         for(const f of files){
             const fname=f.name;
             const img=await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); });
-            const { fr, n, floorDets } = detectFloorFrame(img);
+            const { fr, frR, n, floorDets } = detectFloorFrame(img);
             URL.revokeObjectURL(img.src);
             const thumb=captureThumb(floorDets);
             if(Object.keys(fr).length<3){
@@ -841,7 +884,7 @@
                 addPhotoCard(fname, thumb, 0, 'skipped', `床タグ${n}枚（3枚以上必要）`);
                 continue;
             }
-            floorFrames.push(fr);
+            floorFrames.push({ fr, frR });
             const res=computeFloorMap(floorFrames);
             if(!res){
                 floorFrames.pop();
