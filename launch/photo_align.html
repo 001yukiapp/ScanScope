@@ -42,7 +42,7 @@
 </head>
 <body>
     <h1>ScanScope 写真アライメント</h1>
-    <div class="ver">pa0.11.5 — worldRに床平面拘束(タグ法線=真上にスナップ・25°外れは不採用)＋localizeに安全ガード(コーナーPnPが床下解/高rms/中心Hornと大乖離→中心Hornにフォールバック)。pa0.11.4で発生したコーナーPnP発散(床下解・2000px)を原理的に排除。要床マップ作り直し／pa0.11.4 — 採用条件緩和(クラスタ3個以上で採用・密集浅角でも通過率UP)。pa0.11.3でフリップ排除しコーナー誤差230→40pxに改善も4枚中1枚しか学習せずコーナーPnP不発(2枚必要)の対策。要床マップ作り直し／pa0.11.3 — フリップ排除: 単純平均は単タグposeのフリップ解混入でworldRが壊れコーナー誤差230px・yaw崩壊→pose.R/asol.R両候補を集めクラスタ最大解を採用(bossキャリブ同方式)。★要床マップ作り直し／pa0.11.2 — 順解決閾値撤廃＋誤差px診断 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
+    <div class="ver">pa0.11.6 — worldR学習でフリップ解を法線向きで除外: 床タグ法線は必ずカメラ側を向くので、候補のうち法線がカメラを向かない解(=単タグposeの裏フリップ)を捨ててからクラスタリング。pa0.11.5までコーナーPnPが鏡像(camH負・2000px)に発散した根因＝フリップ解の混入を排除。要床マップ作り直し／pa0.11.5 — 床平面拘束＋安全ガード(タグ法線=真上にスナップ・25°外れは不採用)＋localizeに安全ガード(コーナーPnPが床下解/高rms/中心Hornと大乖離→中心Hornにフォールバック)。pa0.11.4で発生したコーナーPnP発散(床下解・2000px)を原理的に排除。要床マップ作り直し／pa0.11.4 — 採用条件緩和(クラスタ3個以上で採用・密集浅角でも通過率UP)。pa0.11.3でフリップ排除しコーナー誤差230→40pxに改善も4枚中1枚しか学習せずコーナーPnP不発(2枚必要)の対策。要床マップ作り直し／pa0.11.3 — フリップ排除: 単純平均は単タグposeのフリップ解混入でworldRが壊れコーナー誤差230px・yaw崩壊→pose.R/asol.R両候補を集めクラスタ最大解を採用(bossキャリブ同方式)。★要床マップ作り直し／pa0.11.2 — 順解決閾値撤廃＋誤差px診断 — 視点テストにカメラ自己位置モード可視化(床コーナーPnP発動/中心Horn・worldR学習枚数)＝コーナーPnPが効いてるか診断用／pa0.11.0 — 床自己位置をコーナーPnP化(根治): 床マップに各タグのworld向きfloorWorldRを学習し、測定時は床タグ四隅でカメラ姿勢をPnP精緻化(中心Hornは短ベースライン/近接でyaw悪化・コーナーPnPは各タグの向きが回転を拘束し守る・合成テストfloor_corner_test.jsで7〜20倍改善)。旧床マップ(向き無)は自動で中心Hornにフォールバック→要床マップ作り直しでコーナーPnP有効化／pa0.10.1 — 視点バイアステストにオフセット(構図)ゲート追加(ボス中心が画面中心から離れすぎ=斜め/画面端の悪構図を自動除外・既定15%)／pa0.10.0 — ④視点バイアステスト追加(1輪を複数視点で撮りworld yawのばらつき=視点バイアス残差をゲート付き実測・解析viewbias_test.js)／pa0.9.9 — 床タグID拡張(44〜80・リング対応)＋ID別床サイズ(61〜80=小タイル黒部105mm・44〜59=入力欄)。各輪を近接で撮り溜める4輪統合のリング運用に対応／pa0.9.8 — 向きQ学習を反復コーナーPnP精緻化(姿勢をコーナーPnPで高精度化＋姿勢⇄Q反復＝写真BA相当)・キャリブ写真にID番号表示(床不要)／pa0.9.7=keepP精錬でライブが持つ面を落とさない／pa0.9.6=「位置はライブ流用・向きQだけ写真で精錬」モード追加（ライブP固定＋くっきり写真でQをコーナー駆動学習・写真とライブをkeep-bestで比較し悪化させない）/ pa0.9.5=コーナー駆動選択 / pa0.9.0=ボスキャリブ写真化＋4輪測定</div>
 
     <div class="panel">
         <div style="margin-top:0;"><label>写真fx（実測。iPhone14Pro 12MP=2868）</label>
@@ -853,8 +853,15 @@
             const sol=WMGeom.hornPose(fids.map(id=>world[id]),fids.map(id=>fr[id]));
             rmss.push(sol.rms*1000);
             const solRt=matT(sol.R);
+            // このフレームのカメラworld位置 = worldCentroid - solR^T·camCentroid
+            const wbar=centroid3(fids.map(id=>world[id])), cbar2=centroid3(fids.map(id=>fr[id]));
+            const camPos=vsub(wbar, matVec(solRt, cbar2));
             for(const id of fids){ const cs=frR[id]; if(!cs) continue; const list=Array.isArray(cs)?cs:[cs];
-                for(const Rc of list){ if(!Rc) continue; (cand[id]=cand[id]||[]).push(matMul(solRt,Rc)); } }
+                const viewDir=vnorm(vsub(camPos, world[id]));   // タグ→カメラ方向
+                for(const Rc of list){ if(!Rc) continue; const Rtw=matMul(solRt,Rc);
+                    const nrm=[Rtw[0][2],Rtw[1][2],Rtw[2][2]];   // タグ法線(world)
+                    if(vdot(nrm,viewDir)<=0) continue;           // ★法線がカメラを向いてない=フリップ解→除外(床タグは必ずカメラ側を向く)
+                    (cand[id]=cand[id]||[]).push(Rtw); } }
         }
         const worldR={}; const up=[0,1,0];   // 床world基底のy=床法線=真上
         for(const id in cand){ const pick=WMGeom.pickStableRotation(cand[id],25);
